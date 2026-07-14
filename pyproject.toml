@@ -1,1 +1,39 @@
+[project]
+name = "mira-portfolio"
+version = "0.1.0"
+description = "Professional Personal Investment Portfolio Manager"
+requires-python = ">=3.13"
 
+dependencies = [
+    "sqlalchemy>=2.0",
+    "pydantic>=2.11",
+    "pydantic-settings>=2.10",
+    "alembic>=1.16",
+    "loguru>=0.7",
+    "rich>=14.0",
+    "requests>=2.32",
+    "httpx>=0.28",
+    "pandas>=2.3",
+    "openpyxl>=3.1",
+    "matplotlib>=3.10",
+    "pyqtgraph>=0.13",
+    "PySide6>=6.9"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "black",
+    "mypy"
+]
+
+[tool.black]
+line-length = 100
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["app/tests"]
