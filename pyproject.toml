@@ -21,6 +21,9 @@ dependencies = [
     "PySide6>=6.9"
 ]
 
+[project.scripts]
+mira-portfolio = "app.__main__:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest",
