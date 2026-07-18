@@ -1,0 +1,8 @@
+repos:
+  - repo: local
+    hooks:
+      - id: prohibit-floats
+        name: Prohibit float usage in application source
+        entry: python scripts/check_no_floats.py
+        language: system
+        pass_filenames: false

@@ -3,41 +3,35 @@ name = "mira-portfolio"
 version = "0.1.0"
 description = "Professional Personal Investment Portfolio Manager"
 requires-python = ">=3.13"
-
 dependencies = [
-    "sqlalchemy>=2.0",
-    "pydantic>=2.11",
-    "pydantic-settings>=2.10",
-    "alembic>=1.16",
-    "loguru>=0.7",
-    "platformdirs>=4.3",
-    "rich>=14.0",
-    "requests>=2.32",
-    "httpx>=0.28",
-    "pandas>=2.3",
-    "openpyxl>=3.1",
-    "matplotlib>=3.10",
-    "pyqtgraph>=0.13",
-    "PySide6>=6.9"
+    "sqlalchemy>=2.0", "pydantic>=2.11", "pydantic-settings>=2.10", "alembic>=1.16",
+    "loguru>=0.7", "orjson>=3.10", "qasync>=0.27", "platformdirs>=4.3", "typing-extensions>=4.12", "rich>=14.0", "requests>=2.32", "httpx>=0.28", "pandas>=2.3",
+    "openpyxl>=3.1", "matplotlib>=3.10", "pyqtgraph>=0.13", "PySide6>=6.9"
 ]
 
 [project.scripts]
 mira-portfolio = "app.__main__:main"
 
 [project.optional-dependencies]
-dev = [
-    "pytest",
-    "pytest-cov",
-    "ruff",
-    "black",
-    "mypy"
-]
+dev = ["pytest", "pytest-cov", "ruff", "black", "mypy", "pre-commit", "types-requests"]
 
 [tool.black]
-line-length = 100
+line-length = 88
 
 [tool.ruff]
 line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+exclude = ["migrations"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["app/tests"]
