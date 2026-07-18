@@ -56,9 +56,60 @@
 
 ### Next
 
-- Define infrastructure ORM entities and explicit domain-to-entity mappers.
-- Add concrete repository implementations and Alembic migrations.
 - Implement repository-backed calculation and snapshot use cases before connecting the dashboard to live data.
+- Define post-commit event collection and outbox requirements in a future sprint.
+
+## Sprint 1.4 — Persistence Foundation
+
+### Status
+
+Completed.
+
+### Goals Achieved
+
+- Implemented the SQLAlchemy persistence foundation for assets, portfolios, ordered portfolio assets, portfolio-owned transactions, price history, and snapshots.
+- Added explicit domain/ORM mappers and four domain-facing repository implementations.
+- Added a framework-independent `UnitOfWork` protocol and concrete SQLAlchemy transaction boundary.
+- Added Alembic revision `20260718_0001` and validated its full lifecycle.
+- Added isolated unit, integration, migration, and architecture tests.
+
+### Key Technical Decisions
+
+- `ExactDecimal` stores financial values as SQLite text (`VARCHAR(100)`), never `REAL` or `FLOAT`, and preserves precision and trailing zeros.
+- `UTCDateTime` stores aware UTC values as canonical ISO 8601 text and reconstructs aware UTC datetimes.
+- UUID creation and ownership remain in the domain.
+- ORM models remain in infrastructure; domain reconstruction uses public constructors, `Portfolio.add_asset`, and `Portfolio.record_transaction` without private-state manipulation or validation bypass.
+- Repositories receive an injected session and never own commit, rollback, or close behavior.
+- `SQLAlchemyUnitOfWork` creates one session per context and shares it across `assets`, `portfolios`, `price_history`, and `snapshots`.
+- Commit and rollback are explicit. Successful context exit does not auto-commit; uncommitted and exceptional work rolls back, and the session closes deterministically.
+- Transactions remain portfolio-owned; there is no standalone transaction repository.
+
+### Validation Status
+
+- The focused persistence suite passes 60 tests; the full suite passes 117 tests.
+- Alembic upgrade, downgrade to base, repeat upgrade, and ORM metadata comparison pass.
+- All persistence tests use temporary SQLite databases; the repository database remains untouched.
+- Ruff, Sprint 1.4 MyPy, no-float, architecture, import-boundary, and schema consistency checks pass.
+
+### Known Limitations and Deferred Work
+
+- Event publication after commit, post-commit dispatch, transactional outbox, and messaging.
+- `PortfolioMetrics` persistence and a standalone transaction repository.
+- Application services, transaction workflows, portfolio calculations, and automatic snapshot generation.
+- Desktop UI integration and dashboard refresh.
+- API persistence, cloud synchronization, mobile storage, and mobile clients.
+
+### Next Sprint
+
+Sprint 1.5 — Application / Portfolio Engine.
+
+Planned focus:
+
+- Portfolio application use cases and transaction workflows.
+- Position and weighted-average-cost calculations.
+- Realized and unrealized profit and loss.
+- Portfolio valuation.
+- Application-service orchestration through `UnitOfWork`.
 
 ## Delivered Commits
 
