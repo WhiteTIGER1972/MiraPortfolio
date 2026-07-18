@@ -10,6 +10,7 @@ dependencies = [
     "pydantic-settings>=2.10",
     "alembic>=1.16",
     "loguru>=0.7",
+    "platformdirs>=4.3",
     "rich>=14.0",
     "requests>=2.32",
     "httpx>=0.28",
