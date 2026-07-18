@@ -34,4 +34,4 @@ exclude = ["migrations"]
 include = ["app*"]
 
 [tool.pytest.ini_options]
-testpaths = ["app/tests"]
+testpaths = ["tests"]
