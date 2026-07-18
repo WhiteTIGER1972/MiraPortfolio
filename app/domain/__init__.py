@@ -10,6 +10,14 @@ from app.domain.entities import (
     Transaction,
     TransactionType,
 )
+from app.domain.events import (
+    DashboardRefreshRequested,
+    DomainEvent,
+    EventReasonCode,
+    PortfolioUpdated,
+    SnapshotCreated,
+    TransactionAdded,
+)
 from app.domain.value_objects import (
     ISIN,
     Currency,
@@ -25,15 +33,21 @@ __all__ = [
     "AssetType",
     "Currency",
     "CurrencyCode",
+    "DashboardRefreshRequested",
+    "DomainEvent",
+    "EventReasonCode",
     "ISIN",
     "Money",
     "Percentage",
     "Portfolio",
     "PortfolioMetrics",
+    "PortfolioUpdated",
     "PriceHistory",
     "RiskScore",
     "Snapshot",
+    "SnapshotCreated",
     "Ticker",
     "Transaction",
+    "TransactionAdded",
     "TransactionType",
 ]
