@@ -33,20 +33,25 @@ class Settings(BaseSettings):
         description="Market refresh interval in seconds.",
     )
     cache_directory: Path = Field(
-        default_factory=lambda: Path(user_cache_dir(config.APP_NAME, config.COMPANY_NAME))
-        / config.CACHE_DIRECTORY_NAME
+        default_factory=lambda: (
+            Path(user_cache_dir(config.APP_NAME, config.COMPANY_NAME)) / config.CACHE_DIRECTORY_NAME
+        )
     )
     database_directory: Path = Field(
-        default_factory=lambda: Path(user_data_dir(config.APP_NAME, config.COMPANY_NAME))
-        / config.DATABASE_DIRECTORY_NAME
+        default_factory=lambda: (
+            Path(user_data_dir(config.APP_NAME, config.COMPANY_NAME))
+            / config.DATABASE_DIRECTORY_NAME
+        )
     )
     export_directory: Path = Field(
-        default_factory=lambda: Path(user_data_dir(config.APP_NAME, config.COMPANY_NAME))
-        / config.EXPORT_DIRECTORY_NAME
+        default_factory=lambda: (
+            Path(user_data_dir(config.APP_NAME, config.COMPANY_NAME)) / config.EXPORT_DIRECTORY_NAME
+        )
     )
     backup_directory: Path = Field(
-        default_factory=lambda: Path(user_data_dir(config.APP_NAME, config.COMPANY_NAME))
-        / config.BACKUP_DIRECTORY_NAME
+        default_factory=lambda: (
+            Path(user_data_dir(config.APP_NAME, config.COMPANY_NAME)) / config.BACKUP_DIRECTORY_NAME
+        )
     )
     environment: str = config.ENVIRONMENT
     debug: bool = config.DEBUG
