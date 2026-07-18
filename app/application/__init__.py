@@ -9,6 +9,7 @@ from app.application.events import (
     TransactionAddedHandler,
     register_application_event_handlers,
 )
+from app.application.unit_of_work import UnitOfWork
 
 __all__ = [
     "ApplicationEventRegistrations",
@@ -17,5 +18,6 @@ __all__ = [
     "EventPublisher",
     "InProcessEventBus",
     "TransactionAddedHandler",
+    "UnitOfWork",
     "register_application_event_handlers",
 ]
