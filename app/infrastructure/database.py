@@ -1,6 +1,7 @@
 """SQLAlchemy database lifecycle management."""
 
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from sqlite3 import Connection as SQLiteConnection
 from typing import Self
@@ -9,14 +10,11 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.exceptions import DatabaseError
 from app.core.settings import Settings
-
-
-class Base(DeclarativeBase):
-    """Base class for all SQLAlchemy ORM models."""
+from app.infrastructure.persistence.sqlalchemy.base import Base
 
 
 class DatabaseManager:
@@ -121,17 +119,24 @@ def initialize_database(engine: Engine) -> None:
 
 def create_session_factory(engine: Engine) -> sessionmaker[Session]:
     """Create a configured SQLAlchemy session factory."""
-    return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    return sessionmaker(
+        bind=engine,
+        autoflush=False,
+        expire_on_commit=False,
+        close_resets_only=False,
+    )
 
 
+@contextmanager
 def session_scope(factory: sessionmaker[Session]) -> Iterator[Session]:
-    """Yield a transactional session and ensure it is closed."""
+    """Yield an explicit session and roll back any uncommitted transaction."""
     session = factory()
     try:
         yield session
-        session.commit()
     except Exception:
         session.rollback()
         raise
     finally:
+        if session.in_transaction():
+            session.rollback()
         session.close()
