@@ -106,10 +106,119 @@ Sprint 1.5 — Application / Portfolio Engine.
 Planned focus:
 
 - Portfolio application use cases and transaction workflows.
-- Position and weighted-average-cost calculations.
-- Realized and unrealized profit and loss.
+- Position and moving weighted average cost calculations.
+- Realized and unrealized P&L.
 - Portfolio valuation.
 - Application-service orchestration through `UnitOfWork`.
+
+## Sprint 1.5 — Application / Portfolio Engine
+
+### Status
+
+Completed.
+
+### Sprint Objective
+
+Build framework-independent application orchestration and a portfolio engine on top of
+the Sprint 1.4 persistence foundation.
+
+### Delivered
+
+- Immutable command, query, and result DTOs plus the
+  `PortfolioApplicationService` contract and `DefaultPortfolioApplicationService`.
+- UUID-based Asset identity for buy and sell workflows.
+- Explicit application repository ports and typed `UnitOfWork` repository properties.
+- Public, aggregate-owned transaction removal through `Portfolio.remove_transaction`.
+- SQLAlchemy aggregate save/reconciliation and UUID-based Asset and Portfolio deletion.
+- Transactional create, buy, sell, delete, get, and list application workflows.
+- A pure moving weighted average cost `PortfolioPositionCalculator`.
+- Fee-aware cost basis and realized P&L using exact `Decimal` arithmetic.
+- A pure `PortfolioValuationCalculator` with externally supplied prices and separate
+  per-currency totals.
+- Cross-layer acceptance tests using the real application service, `SQLAlchemyUnitOfWork`,
+  repositories, isolated persistence reload, position calculator, and valuation
+  calculator.
+
+### Architectural Decisions
+
+- Asset UUID, not symbol, identifies an Asset in application workflows. Symbols are
+  normalized descriptive data but are not globally unique.
+- `DefaultPortfolioApplicationService` receives a `Callable[[], UnitOfWork]` and creates
+  one `UnitOfWork` per operation.
+- Successful writes commit explicitly once; reads do not commit; failed work is handled
+  by `UnitOfWork` rollback behavior.
+- Repositories may flush but do not commit or roll back. `add` creates a new aggregate,
+  while `save` persists an existing aggregate and does not upsert a missing Portfolio.
+- Portfolio owns its transaction lifecycle, including public removal that preserves
+  remaining order and Asset membership.
+- Moving weighted average cost is the accepted position-accounting method.
+- BUY commission and tax are capitalized into acquisition cost; SELL commission and tax
+  reduce net proceeds and realized P&L.
+- Only BUY and SELL are calculated. Income and corporate-action transaction types fail
+  explicitly with `UnsupportedTransactionTypeError`.
+- Valuation uses externally supplied, UUID-keyed prices in each Asset's own currency.
+- Without an FX model, currency values remain in separate buckets and no cross-currency
+  portfolio total is exposed.
+
+### Challenges Discovered
+
+- Symbols could not support a safe singular lookup: neither symbol nor symbol plus
+  currency is guaranteed unique, so commands were corrected to use Asset UUID.
+- Portfolio initially had no public transaction-removal method; implementation stopped
+  until aggregate-owned removal and a domain-specific absence error were defined.
+- There was no explicit repository save/update contract for loaded aggregates; public
+  repository ports and distinct `add`/`save` semantics were established first.
+- Concrete Asset and Portfolio delete signatures initially accepted entities rather
+  than the UUID identity required by the ports.
+- The initial save task described a `None` return, while the accepted port requires
+  `save(portfolio: Portfolio) -> Portfolio`; the accepted contract remained authoritative.
+- Commission and tax treatment was initially unspecified. The accepted policy
+  capitalizes BUY charges and deducts SELL charges from proceeds.
+- Dividend, rights issue, bonus issue, and stock split accounting lacked sufficient
+  semantics and metadata. They remain unsupported rather than being silently ignored or
+  calculated from assumptions.
+
+At each compatibility gate, implementation stopped until a safe contract or accounting
+policy was established. No symbol-uniqueness assumption, private aggregate mutation,
+persistence shortcut, or undefined corporate-action calculation was introduced.
+
+### Validation Summary
+
+- Full suite: 233 tests passed.
+- New portfolio-engine integration suite: 11 tests passed.
+- Domain suite: 105 tests passed.
+- Application/workflow suite: 30 tests passed.
+- Repository/UnitOfWork suite: 33 tests passed.
+- Migration suite: 5 tests passed.
+- Repository-wide Ruff lint and formatting checks passed.
+- Relevant changed-file and Sprint 1.5 strict MyPy scopes passed; no claim is made that
+  unrelated legacy repository-wide MyPy findings were resolved.
+- Architecture, import-boundary, no-float, direct-SQL, and private-mutation policy scans
+  passed.
+- Isolated test databases were used; development and production database fingerprints
+  remained unchanged.
+
+### Deferred Work
+
+- Dividend and income accounting.
+- Rights issue processing and valuation.
+- Bonus issue processing.
+- Stock split and reverse-split processing.
+- FX rates, currency conversion, and base-currency portfolio totals.
+- Market-price loading from `PriceHistoryRepository`, including stale-price and
+  price-source policy.
+- Snapshot generation.
+- Allocation percentages, percentage and annualized returns, and benchmark comparison.
+- An application-level calculated portfolio query or facade.
+- UI integration and bootstrap/composition wiring for the portfolio engine.
+- Event/outbox publication.
+- Application-level oversell prevalidation, if later desired.
+
+### Sprint Acceptance
+
+Sprint 1.5 is complete when documentation validation passes, the full suite remains at
+233 passing tests or higher, no unrelated files are staged, and the working tree is
+clean after the final documentation commit.
 
 ## Delivered Commits
 
