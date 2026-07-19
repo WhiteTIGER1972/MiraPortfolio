@@ -49,6 +49,8 @@ from app.application.results import (
 )
 from app.application.services import (
     AssetApplicationService,
+    DefaultAssetApplicationService,
+    DefaultMarketPriceApplicationService,
     DefaultPortfolioApplicationService,
     MarketPriceApplicationService,
     PortfolioApplicationService,
@@ -68,6 +70,8 @@ __all__ = [
     "CreateAssetCommand",
     "CreatePortfolioCommand",
     "CurrencyValuationView",
+    "DefaultAssetApplicationService",
+    "DefaultMarketPriceApplicationService",
     "DefaultPortfolioApplicationService",
     "DeleteTransactionCommand",
     "EventDispatcher",

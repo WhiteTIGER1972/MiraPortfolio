@@ -34,6 +34,7 @@ from app.application.results import (
 from app.application.unit_of_work import UnitOfWork
 from app.domain.entities.asset import Asset
 from app.domain.entities.portfolio import Portfolio
+from app.domain.entities.price_history import PriceHistory
 from app.domain.entities.transaction import Transaction, TransactionType
 
 
@@ -47,6 +48,37 @@ class AssetApplicationService(ABC):
     @abstractmethod
     def list_assets(self, query: ListAssetsQuery) -> tuple[AssetView, ...]:
         """Return a page of available Asset views."""
+
+
+class DefaultAssetApplicationService(AssetApplicationService):
+    """Orchestrate Asset use cases through an injected Unit of Work factory."""
+
+    def __init__(self, unit_of_work_factory: Callable[[], UnitOfWork]) -> None:
+        self._unit_of_work_factory = unit_of_work_factory
+
+    def create_asset(self, command: CreateAssetCommand) -> AssetView:
+        """Create and persist a new Asset."""
+        with self._unit_of_work_factory() as unit_of_work:
+            asset = Asset(
+                symbol=command.symbol,
+                name=command.name,
+                asset_type=command.asset_type,
+                currency=command.currency,
+            )
+            persisted = unit_of_work.assets.add(asset)
+            unit_of_work.commit()
+            return _to_asset_view(persisted)
+
+    def list_assets(self, query: ListAssetsQuery) -> tuple[AssetView, ...]:
+        """Return the repository-defined Asset page without committing."""
+        with self._unit_of_work_factory() as unit_of_work:
+            return tuple(
+                _to_asset_view(asset)
+                for asset in unit_of_work.assets.list(
+                    offset=query.offset,
+                    limit=query.limit,
+                )
+            )
 
 
 class MarketPriceApplicationService(ABC):
@@ -63,10 +95,39 @@ class MarketPriceApplicationService(ABC):
     ) -> MarketPriceView | None:
         """Return the latest price, or None when no price exists.
 
-        The future implementation selects greatest ``observed_at`` first and uses a
-        deterministic UUID tie-break for equal timestamps. Tie-break direction remains
-        a persistence-workflow decision.
+        Deterministic selection ordering belongs to the PriceHistory repository.
         """
+
+
+class DefaultMarketPriceApplicationService(MarketPriceApplicationService):
+    """Orchestrate market-price use cases through an injected Unit of Work factory."""
+
+    def __init__(self, unit_of_work_factory: Callable[[], UnitOfWork]) -> None:
+        self._unit_of_work_factory = unit_of_work_factory
+
+    def record_market_price(self, command: RecordMarketPriceCommand) -> MarketPriceView:
+        """Record a new immutable market price for an existing Asset."""
+        with self._unit_of_work_factory() as unit_of_work:
+            asset = _require_asset(unit_of_work, command.asset_id)
+            price_history = PriceHistory(
+                asset_id=asset.id,
+                price=command.price,
+                currency=asset.currency,
+                observed_at=command.observed_at,
+            )
+            persisted = unit_of_work.price_history.add(price_history)
+            unit_of_work.commit()
+            return _to_market_price_view(persisted)
+
+    def get_latest_market_price(
+        self,
+        query: GetLatestMarketPriceQuery,
+    ) -> MarketPriceView | None:
+        """Return the latest price for an existing Asset without committing."""
+        with self._unit_of_work_factory() as unit_of_work:
+            asset = _require_asset(unit_of_work, query.asset_id)
+            price_history = unit_of_work.price_history.get_latest_for_asset(asset.id)
+            return _to_market_price_view(price_history) if price_history is not None else None
 
 
 class PortfolioDashboardQueryService(ABC):
@@ -255,6 +316,28 @@ def _to_transaction_view(transaction: Transaction) -> TransactionView:
     )
 
 
+def _to_asset_view(asset: Asset) -> AssetView:
+    return AssetView(
+        id=asset.id,
+        symbol=asset.symbol,
+        name=asset.name,
+        asset_type=asset.asset_type,
+        currency=asset.currency,
+        is_active=asset.is_active,
+        created_at=asset.created_at,
+    )
+
+
+def _to_market_price_view(price_history: PriceHistory) -> MarketPriceView:
+    return MarketPriceView(
+        id=price_history.id,
+        asset_id=price_history.asset_id,
+        price=price_history.price,
+        currency=price_history.currency,
+        observed_at=price_history.observed_at,
+    )
+
+
 def _to_asset_position_view(asset: Asset) -> AssetPositionView:
     return AssetPositionView(
         id=asset.id,
@@ -269,6 +352,8 @@ def _to_asset_position_view(asset: Asset) -> AssetPositionView:
 
 __all__ = [
     "AssetApplicationService",
+    "DefaultAssetApplicationService",
+    "DefaultMarketPriceApplicationService",
     "DefaultPortfolioApplicationService",
     "MarketPriceApplicationService",
     "PortfolioApplicationService",

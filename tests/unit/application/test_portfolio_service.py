@@ -1,6 +1,7 @@
 """Focused tests for framework-independent portfolio application workflows."""
 
 import ast
+import inspect
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -942,9 +943,10 @@ def test_default_service_remains_framework_independent_and_has_explicit_commits(
             for forbidden in forbidden_imports
         )
     }
-    assert "get_by_symbol" not in source
-    assert "command.symbol" not in source
-    assert "._transactions" not in source
-    assert ".rollback(" not in source
-    assert "float(" not in source
-    assert source.count("unit_of_work.commit()") == 4
+    portfolio_service_source = inspect.getsource(DefaultPortfolioApplicationService)
+    assert "get_by_symbol" not in portfolio_service_source
+    assert "command.symbol" not in portfolio_service_source
+    assert "._transactions" not in portfolio_service_source
+    assert ".rollback(" not in portfolio_service_source
+    assert "float(" not in portfolio_service_source
+    assert portfolio_service_source.count("unit_of_work.commit()") == 4

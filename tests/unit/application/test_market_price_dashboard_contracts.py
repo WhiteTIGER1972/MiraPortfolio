@@ -118,7 +118,5 @@ def test_new_service_contracts_have_no_implementation_or_forbidden_dependency() 
         "unrealized_pnl =",
     ):
         assert forbidden_behavior not in contract_source
-    assert "greatest ``observed_at``" in market_price_source
-    assert "deterministic UUID tie-break" in market_price_source
-    assert "Tie-break direction remains" in market_price_source
+    assert "Deterministic selection ordering belongs to" in market_price_source
     assert "def __init__" not in contract_source
