@@ -388,6 +388,61 @@ def test_buy_asset_records_buy_saves_and_commits_with_exact_values() -> None:
     assert unit_of_work.commit_count == 1
 
 
+def test_buy_asset_propagates_exact_commission_and_tax() -> None:
+    asset = make_asset(identity=1, symbol="FEES")
+    portfolio = make_portfolio(identity=10, name="Buy Charges")
+    commission = Decimal("1.234500")
+    tax = Decimal("0.678900")
+    factory = TrackingUnitOfWorkFactory(assets=(asset,), portfolios=(portfolio,))
+    service = DefaultPortfolioApplicationService(factory)
+
+    result = service.buy_asset(
+        BuyAssetCommand(
+            portfolio_id=portfolio.id,
+            asset_id=asset.id,
+            quantity=Decimal("2.5"),
+            unit_price=Decimal("40.25"),
+            trade_datetime=LATER,
+            commission=commission,
+            tax=tax,
+        )
+    )
+
+    unit_of_work = only_unit_of_work(factory)
+    transaction = portfolio.transactions[0]
+    assert transaction.commission is commission
+    assert transaction.tax is tax
+    assert result.commission is commission
+    assert result.tax is tax
+    assert unit_of_work.portfolio_repository.saved == [portfolio]
+    assert unit_of_work.commit_count == 1
+
+
+def test_buy_negative_commission_preserves_domain_failure_without_save_or_commit() -> None:
+    asset = make_asset(identity=1, symbol="INVALID")
+    portfolio = make_portfolio(identity=10, name="Invalid Buy Charge")
+    factory = TrackingUnitOfWorkFactory(assets=(asset,), portfolios=(portfolio,))
+    service = DefaultPortfolioApplicationService(factory)
+
+    with pytest.raises(ValueError, match="commission cannot be negative"):
+        service.buy_asset(
+            BuyAssetCommand(
+                portfolio_id=portfolio.id,
+                asset_id=asset.id,
+                quantity=Decimal("1"),
+                unit_price=Decimal("2"),
+                trade_datetime=NOW,
+                commission=Decimal("-0.01"),
+            )
+        )
+
+    unit_of_work = only_unit_of_work(factory)
+    assert portfolio.assets == []
+    assert portfolio.transactions == []
+    assert unit_of_work.portfolio_repository.saved == []
+    assert unit_of_work.commit_count == 0
+
+
 def test_buy_missing_portfolio_translates_absence_without_asset_lookup_or_commit() -> None:
     asset = make_asset(identity=1, symbol="BUY")
     missing_portfolio_id = UUID(int=999)
@@ -511,9 +566,66 @@ def test_sell_asset_records_sell_saves_and_commits_once() -> None:
     assert result.asset_id == asset.id
     assert result.quantity is quantity
     assert result.price is unit_price
+    assert result.commission == Decimal("0")
+    assert result.tax == Decimal("0")
     assert result.date is LATER
     assert unit_of_work.portfolio_repository.saved == [portfolio]
     assert unit_of_work.commit_count == 1
+
+
+def test_sell_asset_propagates_exact_commission_and_tax() -> None:
+    asset = make_asset(identity=1, symbol="FEES")
+    portfolio = make_portfolio(identity=10, name="Sell Charges", assets=(asset,))
+    commission = Decimal("2.345600")
+    tax = Decimal("0.789100")
+    factory = TrackingUnitOfWorkFactory(assets=(asset,), portfolios=(portfolio,))
+    service = DefaultPortfolioApplicationService(factory)
+
+    result = service.sell_asset(
+        SellAssetCommand(
+            portfolio_id=portfolio.id,
+            asset_id=asset.id,
+            quantity=Decimal("1.5"),
+            unit_price=Decimal("75.125"),
+            trade_datetime=LATER,
+            commission=commission,
+            tax=tax,
+        )
+    )
+
+    unit_of_work = only_unit_of_work(factory)
+    transaction = portfolio.transactions[0]
+    assert transaction.commission is commission
+    assert transaction.tax is tax
+    assert result.commission is commission
+    assert result.tax is tax
+    assert unit_of_work.portfolio_repository.saved == [portfolio]
+    assert unit_of_work.commit_count == 1
+
+
+def test_sell_negative_tax_preserves_domain_failure_without_save_or_commit() -> None:
+    asset = make_asset(identity=1, symbol="INVALID")
+    portfolio = make_portfolio(identity=10, name="Invalid Sell Charge", assets=(asset,))
+    factory = TrackingUnitOfWorkFactory(assets=(asset,), portfolios=(portfolio,))
+    service = DefaultPortfolioApplicationService(factory)
+
+    with pytest.raises(ValueError, match="tax cannot be negative"):
+        service.sell_asset(
+            SellAssetCommand(
+                portfolio_id=portfolio.id,
+                asset_id=asset.id,
+                quantity=Decimal("1"),
+                unit_price=Decimal("2"),
+                trade_datetime=NOW,
+                tax=Decimal("-0.01"),
+            )
+        )
+
+    unit_of_work = only_unit_of_work(factory)
+    assert portfolio.assets == [asset]
+    assert portfolio.transactions == []
+    assert unit_of_work.portfolio_repository.saved == []
+    assert unit_of_work.commit_count == 0
 
 
 def test_sell_missing_portfolio_does_not_lookup_asset_save_or_commit() -> None:

@@ -2,6 +2,7 @@
 
 from app.application.commands import (
     BuyAssetCommand,
+    CreateAssetCommand,
     CreatePortfolioCommand,
     DeleteTransactionCommand,
     SellAssetCommand,
@@ -27,14 +28,16 @@ from app.application.ports import (
     PriceHistoryRepository,
     SnapshotRepository,
 )
-from app.application.queries import GetPortfolioQuery, ListPortfoliosQuery
+from app.application.queries import GetPortfolioQuery, ListAssetsQuery, ListPortfoliosQuery
 from app.application.results import (
     AssetPositionView,
+    AssetView,
     PortfolioDetails,
     PortfolioSummary,
     TransactionView,
 )
 from app.application.services import (
+    AssetApplicationService,
     DefaultPortfolioApplicationService,
     PortfolioApplicationService,
 )
@@ -43,10 +46,13 @@ from app.application.unit_of_work import UnitOfWork
 __all__ = [
     "ApplicationError",
     "ApplicationEventRegistrations",
+    "AssetApplicationService",
     "AssetNotFoundError",
     "AssetPositionView",
     "AssetRepository",
+    "AssetView",
     "BuyAssetCommand",
+    "CreateAssetCommand",
     "CreatePortfolioCommand",
     "DefaultPortfolioApplicationService",
     "DeleteTransactionCommand",
@@ -55,6 +61,7 @@ __all__ = [
     "EventPublisher",
     "GetPortfolioQuery",
     "InProcessEventBus",
+    "ListAssetsQuery",
     "ListPortfoliosQuery",
     "PortfolioApplicationService",
     "PortfolioDetails",

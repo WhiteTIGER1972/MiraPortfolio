@@ -11,6 +11,19 @@ from app.domain.value_objects.currency import Currency
 
 
 @dataclass(frozen=True, slots=True)
+class AssetView:
+    """Present descriptive Asset data without calculated values."""
+
+    id: UUID
+    symbol: str
+    name: str
+    asset_type: AssetType
+    currency: Currency
+    is_active: bool
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class PortfolioSummary:
     """Present the existing summary fields of a portfolio."""
 
@@ -63,6 +76,7 @@ class PortfolioDetails:
 
 __all__ = [
     "AssetPositionView",
+    "AssetView",
     "PortfolioDetails",
     "PortfolioSummary",
     "TransactionView",

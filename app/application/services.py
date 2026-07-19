@@ -8,14 +8,16 @@ from uuid import UUID
 
 from app.application.commands import (
     BuyAssetCommand,
+    CreateAssetCommand,
     CreatePortfolioCommand,
     DeleteTransactionCommand,
     SellAssetCommand,
 )
 from app.application.exceptions import AssetNotFoundError, PortfolioNotFoundError
-from app.application.queries import GetPortfolioQuery, ListPortfoliosQuery
+from app.application.queries import GetPortfolioQuery, ListAssetsQuery, ListPortfoliosQuery
 from app.application.results import (
     AssetPositionView,
+    AssetView,
     PortfolioDetails,
     PortfolioSummary,
     TransactionView,
@@ -24,6 +26,18 @@ from app.application.unit_of_work import UnitOfWork
 from app.domain.entities.asset import Asset
 from app.domain.entities.portfolio import Portfolio
 from app.domain.entities.transaction import Transaction, TransactionType
+
+
+class AssetApplicationService(ABC):
+    """Define Asset use cases without implementation or persistence concerns."""
+
+    @abstractmethod
+    def create_asset(self, command: CreateAssetCommand) -> AssetView:
+        """Create an Asset and return its descriptive view."""
+
+    @abstractmethod
+    def list_assets(self, query: ListAssetsQuery) -> tuple[AssetView, ...]:
+        """Return a page of available Asset views."""
 
 
 class PortfolioApplicationService(ABC):
@@ -74,11 +88,13 @@ class DefaultPortfolioApplicationService(PortfolioApplicationService):
             portfolio = _require_portfolio(unit_of_work, command.portfolio_id)
             asset = _require_asset(unit_of_work, command.asset_id)
             transaction = _transaction_from_command(
-                asset,
-                command.quantity,
-                command.unit_price,
-                command.trade_datetime,
-                TransactionType.BUY,
+                asset=asset,
+                quantity=command.quantity,
+                unit_price=command.unit_price,
+                trade_datetime=command.trade_datetime,
+                transaction_type=TransactionType.BUY,
+                commission=command.commission,
+                tax=command.tax,
             )
             if not any(held_asset.id == asset.id for held_asset in portfolio.assets):
                 portfolio.add_asset(asset)
@@ -93,11 +109,13 @@ class DefaultPortfolioApplicationService(PortfolioApplicationService):
             portfolio = _require_portfolio(unit_of_work, command.portfolio_id)
             asset = _require_asset(unit_of_work, command.asset_id)
             transaction = _transaction_from_command(
-                asset,
-                command.quantity,
-                command.unit_price,
-                command.trade_datetime,
-                TransactionType.SELL,
+                asset=asset,
+                quantity=command.quantity,
+                unit_price=command.unit_price,
+                trade_datetime=command.trade_datetime,
+                transaction_type=TransactionType.SELL,
+                commission=command.commission,
+                tax=command.tax,
             )
             portfolio.record_transaction(transaction)
             unit_of_work.portfolios.save(portfolio)
@@ -144,16 +162,21 @@ def _require_asset(unit_of_work: UnitOfWork, asset_id: UUID) -> Asset:
 
 def _transaction_from_command(
     asset: Asset,
+    *,
     quantity: Decimal,
     unit_price: Decimal,
     trade_datetime: datetime,
     transaction_type: TransactionType,
+    commission: Decimal,
+    tax: Decimal,
 ) -> Transaction:
     return Transaction(
         asset_id=asset.id,
         quantity=quantity,
         price=unit_price,
         transaction_type=transaction_type,
+        commission=commission,
+        tax=tax,
         date=trade_datetime,
     )
 
@@ -207,4 +230,8 @@ def _to_asset_position_view(asset: Asset) -> AssetPositionView:
     )
 
 
-__all__ = ["DefaultPortfolioApplicationService", "PortfolioApplicationService"]
+__all__ = [
+    "AssetApplicationService",
+    "DefaultPortfolioApplicationService",
+    "PortfolioApplicationService",
+]
