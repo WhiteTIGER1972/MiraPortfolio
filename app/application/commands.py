@@ -18,7 +18,7 @@ class BuyAssetCommand:
     """Request an asset purchase for a portfolio."""
 
     portfolio_id: UUID
-    symbol: str
+    asset_id: UUID
     quantity: Decimal
     unit_price: Decimal
     trade_datetime: datetime
@@ -29,7 +29,7 @@ class SellAssetCommand:
     """Request an asset sale for a portfolio."""
 
     portfolio_id: UUID
-    symbol: str
+    asset_id: UUID
     quantity: Decimal
     unit_price: Decimal
     trade_datetime: datetime
