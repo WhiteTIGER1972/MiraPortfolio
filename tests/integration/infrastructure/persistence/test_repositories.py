@@ -77,7 +77,7 @@ def test_asset_repository_add_get_list_count_and_exists(
         assert [asset.id for asset in repository.list()] == [first.id, second.id]
         assert repository.exists(first.id)
         assert repository.count() == 2
-        repository.delete(make_asset(symbol="ABSENT", identity=UUID(int=999)))
+        repository.delete(UUID(int=999))
         assert repository.count() == 2
     finally:
         session.rollback()
@@ -151,7 +151,7 @@ def test_asset_repository_delete_removes_existing_entity(
     repository = SQLAlchemyAssetRepository(session)
     try:
         repository.add(asset)
-        repository.delete(asset)
+        repository.delete(asset.id)
         assert repository.get(asset.id) is None
     finally:
         session.rollback()
@@ -181,7 +181,7 @@ def test_portfolio_repository_round_trip_preserves_aggregate_order_and_values(
     assert writer_repository.list() == [portfolio]
     assert writer_repository.exists(portfolio.id)
     assert writer_repository.count() == 1
-    writer_repository.delete(Portfolio(name="Absent Portfolio", id=uuid4(), created_at=NOW))
+    writer_repository.delete(uuid4())
     assert writer_repository.count() == 1
     writer.commit()
     writer.close()
@@ -450,7 +450,7 @@ def test_portfolio_delete_cascades_owned_rows_but_preserves_asset(
     portfolio_repository.add(portfolio)
     SQLAlchemySnapshotRepository(writer).add(snapshot)
     writer.commit()
-    portfolio_repository.delete(portfolio)
+    portfolio_repository.delete(portfolio.id)
     writer.commit()
     writer.close()
 

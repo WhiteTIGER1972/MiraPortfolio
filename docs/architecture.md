@@ -17,9 +17,10 @@ app.domain -> Python standard library / app.domain
 ## Layers
 
 - `app/core`: configuration defaults, Pydantic settings, logging, errors, and dependency composition.
-- `app/application`: application bootstrap plus synchronous, in-process event orchestration.
+- `app/application`: application bootstrap, use-case contracts and orchestration, repository
+  ports, `UnitOfWork` boundary, and synchronous in-process event orchestration.
 - `app/domain`: persistence-agnostic business entities, value objects, immutable domain-event types, service and repository extension points, and domain errors.
-- `app/infrastructure`: SQLAlchemy engine lifecycle, ORM models and mappers, repositories, Unit of Work, SQLite pragmas, and Alembic integration.
+- `app/infrastructure`: SQLAlchemy engine lifecycle, ORM models and mappers, repositories, `SQLAlchemyUnitOfWork`, SQLite pragmas, and Alembic integration.
 - `app/repositories`: reusable SQLAlchemy repository implementation; provider-specific adapters will remain outside domain.
 - `app/ui`: programmatic PySide6 presentation layer and design system.
 
@@ -70,9 +71,237 @@ roll back, exceptions propagate unchanged, and the session closes deterministica
 ### Deferred Persistence Work
 
 Post-commit event publication, an outbox, `PortfolioMetrics` persistence, a standalone
-transaction repository, application services, portfolio calculations, automatic snapshot
-generation, dashboard/UI integration, API persistence, cloud synchronization, and mobile
-storage are not implemented.
+transaction repository, automatic snapshot generation, dashboard/UI integration, API
+persistence, cloud synchronization, and mobile storage are not implemented.
+
+## Sprint 1.5 Portfolio Engine
+
+Sprint 1.5 adds framework-independent application orchestration and pure portfolio
+analytics on top of the Sprint 1.4 persistence boundary.
+
+### Application Contracts and Orchestration
+
+The application input contracts are immutable command and query DTOs:
+
+- Commands: `CreatePortfolioCommand`, `BuyAssetCommand`, `SellAssetCommand`, and
+  `DeleteTransactionCommand`.
+- Queries: `GetPortfolioQuery` and `ListPortfoliosQuery`.
+- Results: `PortfolioSummary`, `PortfolioDetails`, `TransactionView`, and
+  `AssetPositionView`.
+
+Despite its current name, `AssetPositionView` contains descriptive `Asset` data only:
+identity, symbol, name, type, currency, active state, and creation time. It does not
+contain calculated quantity, average cost, cost basis, market value, realized P&L, or
+unrealized P&L.
+
+`DefaultPortfolioApplicationService` receives a `Callable[[], UnitOfWork]` through
+constructor injection and obtains one new `UnitOfWork` for each operation. Successful
+create, buy, sell, and delete workflows explicitly call `commit()` exactly once after
+all mutation and persistence work succeeds. Get and list workflows never commit.
+Rollback and resource cleanup remain the responsibility of the `UnitOfWork` context.
+The service translates only absent portfolios and assets to `PortfolioNotFoundError`
+and `AssetNotFoundError`; domain and repository exceptions otherwise propagate.
+
+Transaction commands identify an existing Asset with `asset_id: UUID`. A symbol is
+normalized descriptive data, not identity: symbols are not globally unique, persistence
+allows duplicates, and symbol plus currency is not guaranteed unique. `Asset.id` is the
+canonical transaction identity.
+
+The application-layer repository ports are `AssetRepository`, `PortfolioRepository`,
+`PriceHistoryRepository`, and `SnapshotRepository`. They replace the former private
+generic repository protocol in `UnitOfWork`, whose repository properties now expose
+these explicit types. `add` introduces a new aggregate; `save` persists changes to an
+existing aggregate. The accepted portfolio contract is:
+
+```python
+save(portfolio: Portfolio) -> Portfolio
+```
+
+`save` is not an upsert. A missing persistence target raises `RepositoryError`; a
+successful call returns a domain `Portfolio`, does not expose an ORM model, and does not
+commit internally.
+
+### Portfolio Mutation and Persistence Reconciliation
+
+`Portfolio.remove_transaction(transaction_id: UUID) -> None` removes exactly one owned
+transaction, preserves the relative order of the remaining transactions, and leaves the
+portfolio's Assets unchanged. An unknown identifier raises
+`TransactionNotFoundError`. Removal does not publish a new domain event.
+
+`SQLAlchemyPortfolioRepository.save` reconciles portfolio state without taking over the
+transaction boundary. It matches transactions by UUID, persists additions and supported
+field updates, removes transactions absent from the aggregate, and preserves transaction
+and Asset ordering. Portfolio-to-Asset associations resolve existing Asset rows only;
+save neither updates nor deletes independently persisted Asset data. Unsupported Asset
+association removal is rejected.
+
+Reconciliation avoids duplicate Portfolio, Transaction, Asset, and association rows.
+The repository may flush to validate and stage changes, but it never commits or rolls
+back, so all work remains reversible through `UnitOfWork.rollback()` or exceptional
+context exit. Concrete Asset and Portfolio delete operations also use UUID identity.
+
+### Application Workflow
+
+The runtime dependency flow is:
+
+```text
+UI / future adapter
+        |
+        v
+Command or Query DTO
+        |
+        v
+DefaultPortfolioApplicationService
+        |
+        v
+UnitOfWork -> Repository Port
+                    |
+                    v
+          SQLAlchemy Repository
+                    |
+                    v
+             Domain Aggregate
+```
+
+Write workflows extend that flow explicitly:
+
+```text
+Domain mutation
+        |
+        v
+Repository.add / Repository.save
+        |
+        v
+UnitOfWork.commit
+```
+
+The portfolio service and application contracts do not import infrastructure.
+Infrastructure is supplied at the composition boundary through the injected
+`UnitOfWork` factory.
+
+### Position Calculation
+
+The pure position API is:
+
+```python
+PortfolioPositionCalculator.calculate(
+    portfolio: Portfolio,
+) -> tuple[AssetPosition, ...]
+```
+
+`AssetPosition` is immutable and contains `asset_id`, `quantity`, `average_cost`,
+`cost_basis`, and `realized_pnl`. The calculator processes the canonical
+`Portfolio.transactions` order, calculates each Asset independently with moving
+weighted average cost, returns positions in first-transaction-appearance order, retains
+closed positions, and omits portfolio Assets with no transaction history.
+
+For a BUY:
+
+```text
+gross cost = quantity × unit price
+acquisition cost = gross cost + commission + tax
+new cost basis = current cost basis + acquisition cost
+new average cost = new cost basis / new quantity
+```
+
+BUY commission and tax increase cost basis and average cost; they do not directly change
+realized P&L.
+
+For a SELL:
+
+```text
+gross proceeds = quantity × unit price
+net proceeds = gross proceeds - commission - tax
+disposed cost = quantity × current average cost
+realized P&L change = net proceeds - disposed cost
+```
+
+SELL commission and tax reduce net proceeds and realized P&L. They do not change the
+average cost of a remaining open position. A full close resets quantity, average cost,
+and cost basis to exact `Decimal` zero while preserving cumulative realized P&L. A later
+BUY starts a new acquisition-cost cycle without discarding prior realized P&L.
+
+All arithmetic uses `Decimal`. Zero transaction prices are valid.
+`Transaction.calculate_total()` is deliberately not used because its gross-plus-charges
+formula does not express the required SELL proceeds policy.
+
+Only `TransactionType.BUY` and `TransactionType.SELL` are supported. Dividends, rights
+issues, bonus issues, stock splits, and any other unsupported type raise
+`UnsupportedTransactionTypeError` at their canonical history position; they are never
+silently ignored. An oversell or sell-before-buy history raises
+`InsufficientPositionError`. This is a calculation-validity rule, not a Sprint 1.5
+application-service precondition for selling.
+
+### Portfolio Valuation
+
+Valuation composes the accepted position calculator rather than duplicating transaction
+accounting:
+
+```python
+PortfolioValuationCalculator.calculate(
+    portfolio: Portfolio,
+    market_prices: Mapping[UUID, Decimal],
+) -> PortfolioValuation
+```
+
+`ValuedAssetPosition` is immutable and contains `asset_id`, `currency`, `quantity`,
+`average_cost`, `cost_basis`, `market_price`, `market_value`, `realized_pnl`,
+`unrealized_pnl`, and `total_pnl`. For an open position:
+
+```text
+market value = quantity × market price
+unrealized P&L = market value - cost basis
+total P&L = realized P&L + unrealized P&L
+```
+
+A closed position remains included, consumes no current price, has
+`market_price = None`, zero market value and unrealized P&L, and total P&L equal to
+realized P&L.
+
+`CurrencyValuation` contains `currency`, `cost_basis`, `market_value`, `realized_pnl`,
+`unrealized_pnl`, and `total_pnl`. `PortfolioValuation` contains only immutable
+`positions` and `currencies` tuples.
+
+Current prices are supplied by the caller, keyed by Asset UUID, and denominated in the
+Asset's own currency. The calculator performs no repository or price-history lookup.
+An open position without a supplied price raises `MissingMarketPriceError`; a consumed
+negative price raises `InvalidMarketPriceError`; zero is valid. Extra prices are ignored,
+and closed positions do not consume supplied prices. An Asset position that cannot be
+matched to public portfolio Asset metadata raises `PositionAssetNotFoundError`.
+
+Each Asset is valued in its own currency. Totals are grouped into separate
+`CurrencyValuation` buckets ordered by first currency appearance in position order.
+There is no FX conversion, base-currency inference, or cross-currency portfolio grand
+total. Values in different currencies must not be added together; this is a deliberate
+correctness boundary.
+
+Position and valuation results are immutable, result collections are tuples, and both
+calculators are stateless. They perform no I/O, repository access, `UnitOfWork` access,
+logging, persistence, or event publication. They do not mutate the input Portfolio or
+price mapping and do not convert through `float`, round, quantize, or mutate the global
+`Decimal` context.
+
+### Cross-Layer Acceptance Validation
+
+The Sprint 1.5 acceptance path uses real components:
+
+```text
+Application service
+        -> SQLAlchemyUnitOfWork
+        -> SQLAlchemy repositories
+        -> isolated SQLite persistence
+        -> domain-object reload
+        -> position calculation
+        -> valuation calculation
+```
+
+The integration suite validates create, buy, partial sell, full close, close and reopen,
+transaction deletion, get and list, rollback, repeated-save deduplication, missing-target
+save rejection, duplicate symbols resolved by UUID, fee-aware persistence and
+calculation, zero-price transactions and valuation, oversell after reload, unsupported
+transaction types after reload, multiple Assets, multiple currencies, closed-only
+currency buckets, and empty portfolios. Production and development databases are not
+used by these tests.
 
 ## Domain Events
 
@@ -117,9 +346,9 @@ layers.
 ## Tests
 
 Tests live under the root `tests/` directory, and pytest uses `testpaths = ["tests"]`.
-The focused Sprint 1.4 persistence suite contains 60 tests, and the full suite contains
-117 tests. Persistence tests use temporary SQLite databases and do not touch the
-repository database file.
+At Sprint 1.5 completion, the full suite contains 233 passing tests, including 11 new
+cross-layer portfolio-engine integration tests. Integration and persistence tests use
+temporary SQLite databases and do not touch development or production database files.
 
 ## Database Lifecycle
 

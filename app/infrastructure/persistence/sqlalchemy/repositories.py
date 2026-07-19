@@ -25,9 +25,11 @@ from app.infrastructure.persistence.sqlalchemy.mappers import (
 )
 from app.infrastructure.persistence.sqlalchemy.models import (
     AssetModel,
+    PortfolioAssetModel,
     PortfolioModel,
     PriceHistoryModel,
     SnapshotModel,
+    TransactionModel,
 )
 
 
@@ -129,8 +131,8 @@ class SQLAlchemyAssetRepository(_DomainRepository[Asset, AssetModel]):
         self._models.add(asset_to_model(entity))
         return entity
 
-    def delete(self, entity: Asset) -> None:
-        self._delete_by_id(entity.id)
+    def delete(self, asset_id: UUID) -> None:
+        self._delete_by_id(asset_id)
 
 
 class SQLAlchemyPortfolioRepository(_DomainRepository[Portfolio, PortfolioModel]):
@@ -147,10 +149,13 @@ class SQLAlchemyPortfolioRepository(_DomainRepository[Portfolio, PortfolioModel]
             selectinload(PortfolioModel.transactions),
         )
 
-    def get(self, identity: UUID) -> Portfolio | None:
-        model = self._session.scalar(
-            self._aggregate_statement().where(PortfolioModel.id == identity)
+    def _get_model(self, portfolio_id: UUID) -> PortfolioModel | None:
+        return self._session.scalar(
+            self._aggregate_statement().where(PortfolioModel.id == portfolio_id)
         )
+
+    def get(self, identity: UUID) -> Portfolio | None:
+        model = self._get_model(identity)
         return portfolio_to_domain(model) if model is not None else None
 
     def list(self, *, offset: int = 0, limit: int = 100) -> Sequence[Portfolio]:
@@ -173,8 +178,143 @@ class SQLAlchemyPortfolioRepository(_DomainRepository[Portfolio, PortfolioModel]
         self._models.add(portfolio_to_model(entity))
         return entity
 
-    def delete(self, entity: Portfolio) -> None:
-        self._delete_by_id(entity.id)
+    def save(self, portfolio: Portfolio) -> Portfolio:
+        desired = portfolio_to_model(portfolio)
+        persisted = self._get_model(desired.id)
+        if persisted is None:
+            raise RepositoryError(f"Portfolio {desired.id} does not exist.")
+
+        self._validate_assets(portfolio, persisted)
+        self._validate_unique_child_identities(desired)
+        self._stage_owned_positions(persisted, desired)
+
+        persisted.name = desired.name
+        persisted.base_currency = desired.base_currency
+        persisted.is_archived = desired.is_archived
+        persisted.created_at = desired.created_at
+        self._reconcile_asset_links(persisted, desired)
+        self._reconcile_transactions(persisted, desired)
+        self._flush("update")
+        return portfolio
+
+    def delete(self, portfolio_id: UUID) -> None:
+        self._delete_by_id(portfolio_id)
+
+    def _validate_assets(
+        self,
+        portfolio: Portfolio,
+        persisted: PortfolioModel,
+    ) -> None:
+        desired_asset_ids = {asset.id for asset in portfolio.assets}
+        persisted_asset_ids = {link.asset_id for link in persisted.asset_links}
+        if not persisted_asset_ids.issubset(desired_asset_ids):
+            raise RepositoryError("Portfolio asset associations cannot be removed through save.")
+        for asset in portfolio.assets:
+            persisted_asset = self._assets.get(asset.id)
+            if persisted_asset is None:
+                raise RepositoryError(f"Portfolio references Asset {asset.id} that does not exist.")
+            if asset_to_domain(persisted_asset) != asset:
+                raise RepositoryError(
+                    "Portfolio references an asset identifier with conflicting values."
+                )
+
+    @staticmethod
+    def _validate_unique_child_identities(portfolio: PortfolioModel) -> None:
+        asset_ids = [link.asset_id for link in portfolio.asset_links]
+        if len(asset_ids) != len(set(asset_ids)):
+            raise RepositoryError("Portfolio contains duplicate asset identifiers.")
+        transaction_ids = [transaction.id for transaction in portfolio.transactions]
+        if len(transaction_ids) != len(set(transaction_ids)):
+            raise RepositoryError("Portfolio contains duplicate transaction identifiers.")
+
+    def _stage_owned_positions(
+        self,
+        persisted: PortfolioModel,
+        desired: PortfolioModel,
+    ) -> None:
+        asset_start = (
+            max(
+                max((link.position for link in persisted.asset_links), default=-1),
+                len(desired.asset_links) - 1,
+            )
+            + 1
+        )
+        transaction_start = (
+            max(
+                max(
+                    (transaction.position for transaction in persisted.transactions),
+                    default=-1,
+                ),
+                len(desired.transactions) - 1,
+            )
+            + 1
+        )
+        for offset, link in enumerate(persisted.asset_links):
+            link.position = asset_start + offset
+        for offset, transaction in enumerate(persisted.transactions):
+            transaction.position = transaction_start + offset
+        if persisted.asset_links or persisted.transactions:
+            self._flush("stage update for")
+
+    @staticmethod
+    def _reconcile_asset_links(
+        persisted: PortfolioModel,
+        desired: PortfolioModel,
+    ) -> None:
+        existing = {link.asset_id: link for link in persisted.asset_links}
+        reconciled: list[PortfolioAssetModel] = []
+        for desired_link in desired.asset_links:
+            link = existing.get(desired_link.asset_id)
+            if link is None:
+                link = PortfolioAssetModel(
+                    portfolio_id=persisted.id,
+                    asset_id=desired_link.asset_id,
+                    position=desired_link.position,
+                )
+            else:
+                link.position = desired_link.position
+            reconciled.append(link)
+        persisted.asset_links[:] = reconciled
+
+    @staticmethod
+    def _reconcile_transactions(
+        persisted: PortfolioModel,
+        desired: PortfolioModel,
+    ) -> None:
+        existing = {transaction.id: transaction for transaction in persisted.transactions}
+        reconciled: list[TransactionModel] = []
+        for desired_transaction in desired.transactions:
+            transaction = existing.get(desired_transaction.id)
+            if transaction is None:
+                transaction = TransactionModel(
+                    id=desired_transaction.id,
+                    portfolio_id=persisted.id,
+                    asset_id=desired_transaction.asset_id,
+                    position=desired_transaction.position,
+                    quantity=desired_transaction.quantity,
+                    price=desired_transaction.price,
+                    transaction_type=desired_transaction.transaction_type,
+                    commission=desired_transaction.commission,
+                    tax=desired_transaction.tax,
+                    date=desired_transaction.date,
+                )
+            else:
+                transaction.asset_id = desired_transaction.asset_id
+                transaction.position = desired_transaction.position
+                transaction.quantity = desired_transaction.quantity
+                transaction.price = desired_transaction.price
+                transaction.transaction_type = desired_transaction.transaction_type
+                transaction.commission = desired_transaction.commission
+                transaction.tax = desired_transaction.tax
+                transaction.date = desired_transaction.date
+            reconciled.append(transaction)
+        persisted.transactions[:] = reconciled
+
+    def _flush(self, operation: str) -> None:
+        try:
+            self._session.flush()
+        except SQLAlchemyError as error:
+            raise RepositoryError(f"Could not {operation} PortfolioModel entity.") from error
 
 
 class SQLAlchemyPriceHistoryRepository(_DomainRepository[PriceHistory, PriceHistoryModel]):

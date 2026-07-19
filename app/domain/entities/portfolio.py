@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 from app.domain.entities.asset import Asset
 from app.domain.entities.transaction import Transaction
+from app.domain.exceptions import TransactionNotFoundError
 from app.domain.value_objects.currency import Currency
 
 
@@ -43,3 +44,17 @@ class Portfolio:
         if not any(asset.id == transaction.asset_id for asset in self.assets):
             raise ValueError("Transaction asset must belong to the portfolio.")
         self.transactions.append(transaction)
+
+    def remove_transaction(self, transaction_id: UUID) -> None:
+        """Remove an owned transaction while preserving the remaining order."""
+        transaction_index = next(
+            (
+                index
+                for index, transaction in enumerate(self.transactions)
+                if transaction.id == transaction_id
+            ),
+            None,
+        )
+        if transaction_index is None:
+            raise TransactionNotFoundError(transaction_id)
+        del self.transactions[transaction_index]
