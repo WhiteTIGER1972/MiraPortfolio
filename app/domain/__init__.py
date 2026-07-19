@@ -20,18 +20,27 @@ from app.domain.events import (
 )
 from app.domain.exceptions import (
     InsufficientPositionError,
+    InvalidMarketPriceError,
+    MissingMarketPriceError,
+    PositionAssetNotFoundError,
     UnsupportedTransactionTypeError,
 )
-from app.domain.services import PortfolioPositionCalculator
+from app.domain.services import (
+    PortfolioPositionCalculator,
+    PortfolioValuationCalculator,
+)
 from app.domain.value_objects import (
     ISIN,
     AssetPosition,
     Currency,
     CurrencyCode,
+    CurrencyValuation,
     Money,
     Percentage,
+    PortfolioValuation,
     RiskScore,
     Ticker,
+    ValuedAssetPosition,
 )
 
 __all__ = [
@@ -40,17 +49,23 @@ __all__ = [
     "AssetType",
     "Currency",
     "CurrencyCode",
+    "CurrencyValuation",
     "DashboardRefreshRequested",
     "DomainEvent",
     "EventReasonCode",
     "ISIN",
     "InsufficientPositionError",
+    "InvalidMarketPriceError",
+    "MissingMarketPriceError",
     "Money",
     "Percentage",
     "Portfolio",
     "PortfolioMetrics",
     "PortfolioPositionCalculator",
+    "PortfolioValuation",
+    "PortfolioValuationCalculator",
     "PortfolioUpdated",
+    "PositionAssetNotFoundError",
     "PriceHistory",
     "RiskScore",
     "Snapshot",
@@ -60,4 +75,5 @@ __all__ = [
     "TransactionAdded",
     "TransactionType",
     "UnsupportedTransactionTypeError",
+    "ValuedAssetPosition",
 ]

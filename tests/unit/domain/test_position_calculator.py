@@ -1139,6 +1139,13 @@ def test_position_engine_has_no_forbidden_architecture_dependencies() -> None:
     }
     imports = set().union(*(imported_modules(path) for path in production_files))
     source = "\n".join(path.read_text(encoding="utf-8") for path in production_files)
+    position_source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            CALCULATOR_MODULE,
+            POSITION_MODULE,
+        )
+    )
 
     assert not {
         imported
@@ -1155,7 +1162,6 @@ def test_position_engine_has_no_forbidden_architecture_dependencies() -> None:
         "float(",
         ".quantize(",
         "calculate_total(",
-        "market_price",
         "market_value",
         "unrealized",
         "total_return",
@@ -1165,3 +1171,4 @@ def test_position_engine_has_no_forbidden_architecture_dependencies() -> None:
         "sorted(",
     ):
         assert forbidden_token not in source
+    assert "market_price" not in position_source

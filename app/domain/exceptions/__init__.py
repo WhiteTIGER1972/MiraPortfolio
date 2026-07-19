@@ -55,10 +55,38 @@ class UnsupportedTransactionTypeError(DomainError):
         )
 
 
+class PositionAssetNotFoundError(DomainError):
+    """Raised when a calculated position has no matching portfolio Asset."""
+
+    def __init__(self, asset_id: UUID) -> None:
+        self.asset_id = asset_id
+        super().__init__(f"Position references Asset {asset_id}, which is not in the portfolio.")
+
+
+class MissingMarketPriceError(DomainError):
+    """Raised when an open position has no caller-supplied market price."""
+
+    def __init__(self, asset_id: UUID) -> None:
+        self.asset_id = asset_id
+        super().__init__(f"Asset {asset_id} requires a current market price.")
+
+
+class InvalidMarketPriceError(DomainError):
+    """Raised when a consumed market price is negative."""
+
+    def __init__(self, asset_id: UUID, market_price: Decimal) -> None:
+        self.asset_id = asset_id
+        self.market_price = market_price
+        super().__init__(f"Asset {asset_id} has invalid market price {market_price}.")
+
+
 __all__ = [
     "DomainError",
     "DomainValidationError",
     "InsufficientPositionError",
+    "InvalidMarketPriceError",
+    "MissingMarketPriceError",
+    "PositionAssetNotFoundError",
     "TransactionNotFoundError",
     "UnsupportedTransactionTypeError",
 ]
