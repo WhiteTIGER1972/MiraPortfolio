@@ -21,6 +21,12 @@ from app.application.exceptions import (
     PortfolioNotFoundError,
     ValidationError,
 )
+from app.application.ports import (
+    AssetRepository,
+    PortfolioRepository,
+    PriceHistoryRepository,
+    SnapshotRepository,
+)
 from app.application.queries import GetPortfolioQuery, ListPortfoliosQuery
 from app.application.results import (
     AssetPositionView,
@@ -36,6 +42,7 @@ __all__ = [
     "ApplicationEventRegistrations",
     "AssetNotFoundError",
     "AssetPositionView",
+    "AssetRepository",
     "BuyAssetCommand",
     "CreatePortfolioCommand",
     "DeleteTransactionCommand",
@@ -48,8 +55,11 @@ __all__ = [
     "PortfolioApplicationService",
     "PortfolioDetails",
     "PortfolioNotFoundError",
+    "PortfolioRepository",
     "PortfolioSummary",
+    "PriceHistoryRepository",
     "SellAssetCommand",
+    "SnapshotRepository",
     "TransactionView",
     "TransactionAddedHandler",
     "UnitOfWork",
