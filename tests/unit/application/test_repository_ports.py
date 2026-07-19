@@ -61,6 +61,7 @@ def test_repository_ports_declare_exact_supported_operations() -> None:
         "delete",
         "exists",
         "get",
+        "get_latest_for_asset",
         "list",
     }
     assert SnapshotRepository.__abstractmethods__ == {
@@ -106,6 +107,24 @@ def test_repository_list_contracts_preserve_pagination_and_sequence_results() ->
         assert signature.parameters["limit"].default == 100
         assert signature.parameters["limit"].kind is inspect.Parameter.KEYWORD_ONLY
         assert get_type_hints(list_method)["return"] == expected_return
+
+
+def test_price_history_repository_declares_uuid_latest_price_lookup() -> None:
+    method = PriceHistoryRepository.get_latest_for_asset
+
+    assert tuple(inspect.signature(method).parameters) == ("self", "asset_id")
+    assert get_type_hints(method) == {
+        "asset_id": UUID,
+        "return": PriceHistory | None,
+    }
+    assert not {
+        "symbol",
+        "currency",
+        "portfolio_id",
+        "provider",
+        "date",
+        "limit",
+    } & set(inspect.signature(method).parameters)
 
 
 def test_portfolio_add_and_save_are_distinct_required_operations() -> None:
