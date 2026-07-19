@@ -5,6 +5,7 @@ from app.application.commands import (
     CreateAssetCommand,
     CreatePortfolioCommand,
     DeleteTransactionCommand,
+    RecordMarketPriceCommand,
     SellAssetCommand,
 )
 from app.application.events import (
@@ -28,18 +29,30 @@ from app.application.ports import (
     PriceHistoryRepository,
     SnapshotRepository,
 )
-from app.application.queries import GetPortfolioQuery, ListAssetsQuery, ListPortfoliosQuery
+from app.application.queries import (
+    GetLatestMarketPriceQuery,
+    GetPortfolioDashboardQuery,
+    GetPortfolioQuery,
+    ListAssetsQuery,
+    ListPortfoliosQuery,
+)
 from app.application.results import (
     AssetPositionView,
     AssetView,
+    CurrencyValuationView,
+    MarketPriceView,
+    PortfolioDashboard,
     PortfolioDetails,
     PortfolioSummary,
     TransactionView,
+    ValuedAssetPositionView,
 )
 from app.application.services import (
     AssetApplicationService,
     DefaultPortfolioApplicationService,
+    MarketPriceApplicationService,
     PortfolioApplicationService,
+    PortfolioDashboardQueryService,
 )
 from app.application.unit_of_work import UnitOfWork
 
@@ -54,26 +67,35 @@ __all__ = [
     "BuyAssetCommand",
     "CreateAssetCommand",
     "CreatePortfolioCommand",
+    "CurrencyValuationView",
     "DefaultPortfolioApplicationService",
     "DeleteTransactionCommand",
     "EventDispatcher",
     "EventHandler",
     "EventPublisher",
+    "GetLatestMarketPriceQuery",
+    "GetPortfolioDashboardQuery",
     "GetPortfolioQuery",
     "InProcessEventBus",
     "ListAssetsQuery",
     "ListPortfoliosQuery",
+    "MarketPriceApplicationService",
+    "MarketPriceView",
     "PortfolioApplicationService",
+    "PortfolioDashboard",
+    "PortfolioDashboardQueryService",
     "PortfolioDetails",
     "PortfolioNotFoundError",
     "PortfolioRepository",
     "PortfolioSummary",
     "PriceHistoryRepository",
+    "RecordMarketPriceCommand",
     "SellAssetCommand",
     "SnapshotRepository",
     "TransactionView",
     "TransactionAddedHandler",
     "UnitOfWork",
     "ValidationError",
+    "ValuedAssetPositionView",
     "register_application_event_handlers",
 ]

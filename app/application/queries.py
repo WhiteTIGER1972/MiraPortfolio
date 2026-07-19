@@ -13,6 +13,20 @@ class ListAssetsQuery:
 
 
 @dataclass(frozen=True, slots=True)
+class GetLatestMarketPriceQuery:
+    """Request the latest recorded market price for an Asset."""
+
+    asset_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class GetPortfolioDashboardQuery:
+    """Request a calculated dashboard for one Portfolio."""
+
+    portfolio_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
 class GetPortfolioQuery:
     """Request one portfolio by identity."""
 
@@ -24,4 +38,10 @@ class ListPortfoliosQuery:
     """Request the available portfolios."""
 
 
-__all__ = ["GetPortfolioQuery", "ListAssetsQuery", "ListPortfoliosQuery"]
+__all__ = [
+    "GetLatestMarketPriceQuery",
+    "GetPortfolioDashboardQuery",
+    "GetPortfolioQuery",
+    "ListAssetsQuery",
+    "ListPortfoliosQuery",
+]

@@ -20,6 +20,15 @@ class CreateAssetCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class RecordMarketPriceCommand:
+    """Request recording a market price for an existing Asset."""
+
+    asset_id: UUID
+    price: Decimal
+    observed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class CreatePortfolioCommand:
     """Request creation of a portfolio."""
 
@@ -65,5 +74,6 @@ __all__ = [
     "CreateAssetCommand",
     "CreatePortfolioCommand",
     "DeleteTransactionCommand",
+    "RecordMarketPriceCommand",
     "SellAssetCommand",
 ]

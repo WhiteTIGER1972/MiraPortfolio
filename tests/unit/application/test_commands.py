@@ -10,6 +10,7 @@ import pytest
 from app.application.commands import (
     BuyAssetCommand,
     CreateAssetCommand,
+    RecordMarketPriceCommand,
     SellAssetCommand,
 )
 from app.domain.entities.asset import AssetType
@@ -22,6 +23,7 @@ UNIT_PRICE = Decimal("987.654321")
 COMMISSION = Decimal("1.2345")
 TAX = Decimal("0.6789")
 TRADE_DATETIME = datetime(2026, 7, 19, 14, 30, 45, 123456, tzinfo=UTC)
+PRICE_OBSERVED_AT = datetime(2026, 7, 20, 10, 15, 30, 654321, tzinfo=UTC)
 TRANSACTION_COMMAND_FIELDS = (
     "portfolio_id",
     "asset_id",
@@ -65,6 +67,38 @@ def test_create_asset_command_has_exact_passive_immutable_contract() -> None:
     } & {field.name for field in fields(CreateAssetCommand)}
     with pytest.raises(FrozenInstanceError):
         setattr(command, "symbol", "CHANGED")
+
+
+def test_record_market_price_command_has_exact_passive_immutable_contract() -> None:
+    zero_price = Decimal("0")
+    command = RecordMarketPriceCommand(
+        asset_id=ASSET_ID,
+        price=zero_price,
+        observed_at=PRICE_OBSERVED_AT,
+    )
+
+    assert tuple(field.name for field in fields(RecordMarketPriceCommand)) == (
+        "asset_id",
+        "price",
+        "observed_at",
+    )
+    assert command.asset_id is ASSET_ID
+    assert command.price is zero_price
+    assert command.observed_at is PRICE_OBSERVED_AT
+    assert not hasattr(command, "__dict__")
+    assert not {
+        "symbol",
+        "name",
+        "currency",
+        "portfolio_id",
+        "id",
+        "provider",
+        "source",
+        "is_stale",
+        "is_fresh",
+    } & {field.name for field in fields(RecordMarketPriceCommand)}
+    with pytest.raises(FrozenInstanceError):
+        setattr(command, "price", Decimal("1"))
 
 
 def test_buy_asset_command_preserves_exact_typed_values_and_is_immutable() -> None:

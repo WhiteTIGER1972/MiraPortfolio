@@ -11,13 +11,22 @@ from app.application.commands import (
     CreateAssetCommand,
     CreatePortfolioCommand,
     DeleteTransactionCommand,
+    RecordMarketPriceCommand,
     SellAssetCommand,
 )
 from app.application.exceptions import AssetNotFoundError, PortfolioNotFoundError
-from app.application.queries import GetPortfolioQuery, ListAssetsQuery, ListPortfoliosQuery
+from app.application.queries import (
+    GetLatestMarketPriceQuery,
+    GetPortfolioDashboardQuery,
+    GetPortfolioQuery,
+    ListAssetsQuery,
+    ListPortfoliosQuery,
+)
 from app.application.results import (
     AssetPositionView,
     AssetView,
+    MarketPriceView,
+    PortfolioDashboard,
     PortfolioDetails,
     PortfolioSummary,
     TransactionView,
@@ -38,6 +47,34 @@ class AssetApplicationService(ABC):
     @abstractmethod
     def list_assets(self, query: ListAssetsQuery) -> tuple[AssetView, ...]:
         """Return a page of available Asset views."""
+
+
+class MarketPriceApplicationService(ABC):
+    """Define manual market-price use cases without implementation concerns."""
+
+    @abstractmethod
+    def record_market_price(self, command: RecordMarketPriceCommand) -> MarketPriceView:
+        """Record a price for an existing Asset."""
+
+    @abstractmethod
+    def get_latest_market_price(
+        self,
+        query: GetLatestMarketPriceQuery,
+    ) -> MarketPriceView | None:
+        """Return the latest price, or None when no price exists.
+
+        The future implementation selects greatest ``observed_at`` first and uses a
+        deterministic UUID tie-break for equal timestamps. Tie-break direction remains
+        a persistence-workflow decision.
+        """
+
+
+class PortfolioDashboardQueryService(ABC):
+    """Define calculated Portfolio dashboard queries without orchestration."""
+
+    @abstractmethod
+    def get_dashboard(self, query: GetPortfolioDashboardQuery) -> PortfolioDashboard:
+        """Return a complete dashboard without committing."""
 
 
 class PortfolioApplicationService(ABC):
@@ -233,5 +270,7 @@ def _to_asset_position_view(asset: Asset) -> AssetPositionView:
 __all__ = [
     "AssetApplicationService",
     "DefaultPortfolioApplicationService",
+    "MarketPriceApplicationService",
     "PortfolioApplicationService",
+    "PortfolioDashboardQueryService",
 ]
