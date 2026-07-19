@@ -34,7 +34,10 @@ from app.application.results import (
     PortfolioSummary,
     TransactionView,
 )
-from app.application.services import PortfolioApplicationService
+from app.application.services import (
+    DefaultPortfolioApplicationService,
+    PortfolioApplicationService,
+)
 from app.application.unit_of_work import UnitOfWork
 
 __all__ = [
@@ -45,6 +48,7 @@ __all__ = [
     "AssetRepository",
     "BuyAssetCommand",
     "CreatePortfolioCommand",
+    "DefaultPortfolioApplicationService",
     "DeleteTransactionCommand",
     "EventDispatcher",
     "EventHandler",
