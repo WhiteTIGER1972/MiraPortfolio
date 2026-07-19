@@ -25,17 +25,31 @@ from app.application.queries import (
 from app.application.results import (
     AssetPositionView,
     AssetView,
+    CurrencyValuationView,
     MarketPriceView,
     PortfolioDashboard,
     PortfolioDetails,
     PortfolioSummary,
     TransactionView,
+    ValuedAssetPositionView,
 )
 from app.application.unit_of_work import UnitOfWork
 from app.domain.entities.asset import Asset
 from app.domain.entities.portfolio import Portfolio
 from app.domain.entities.price_history import PriceHistory
 from app.domain.entities.transaction import Transaction, TransactionType
+from app.domain.exceptions import MissingMarketPriceError, PositionAssetNotFoundError
+from app.domain.services import (
+    PortfolioPositionCalculator,
+    PortfolioValuationCalculator,
+)
+from app.domain.value_objects.portfolio_valuation import (
+    CurrencyValuation,
+    PortfolioValuation,
+    ValuedAssetPosition,
+)
+
+_ZERO = Decimal("0")
 
 
 class AssetApplicationService(ABC):
@@ -136,6 +150,58 @@ class PortfolioDashboardQueryService(ABC):
     @abstractmethod
     def get_dashboard(self, query: GetPortfolioDashboardQuery) -> PortfolioDashboard:
         """Return a complete dashboard without committing."""
+
+
+class DefaultPortfolioDashboardQueryService(PortfolioDashboardQueryService):
+    """Orchestrate calculated Portfolio dashboard reads."""
+
+    def __init__(
+        self,
+        unit_of_work_factory: Callable[[], UnitOfWork],
+        position_calculator: PortfolioPositionCalculator | None = None,
+        valuation_calculator: PortfolioValuationCalculator | None = None,
+    ) -> None:
+        self._unit_of_work_factory = unit_of_work_factory
+        self._position_calculator = (
+            position_calculator
+            if position_calculator is not None
+            else PortfolioPositionCalculator()
+        )
+        self._valuation_calculator = (
+            valuation_calculator
+            if valuation_calculator is not None
+            else PortfolioValuationCalculator(
+                position_calculator=self._position_calculator,
+            )
+        )
+
+    def get_dashboard(self, query: GetPortfolioDashboardQuery) -> PortfolioDashboard:
+        """Load, calculate, value, and map one Portfolio without committing."""
+        with self._unit_of_work_factory() as unit_of_work:
+            portfolio = _require_portfolio(unit_of_work, query.portfolio_id)
+            calculated_positions = self._position_calculator.calculate(portfolio)
+            latest_prices_by_asset: dict[UUID, PriceHistory] = {}
+            market_prices: dict[UUID, Decimal] = {}
+
+            for position in calculated_positions:
+                if position.quantity == _ZERO:
+                    continue
+                latest_price = unit_of_work.price_history.get_latest_for_asset(
+                    position.asset_id,
+                )
+                if latest_price is not None:
+                    latest_prices_by_asset[position.asset_id] = latest_price
+                    market_prices[position.asset_id] = latest_price.price
+
+            valuation = self._valuation_calculator.calculate(
+                portfolio,
+                market_prices,
+            )
+            return _to_portfolio_dashboard(
+                portfolio=portfolio,
+                valuation=valuation,
+                latest_prices_by_asset=latest_prices_by_asset,
+            )
 
 
 class PortfolioApplicationService(ABC):
@@ -338,6 +404,78 @@ def _to_market_price_view(price_history: PriceHistory) -> MarketPriceView:
     )
 
 
+def _to_portfolio_dashboard(
+    *,
+    portfolio: Portfolio,
+    valuation: PortfolioValuation,
+    latest_prices_by_asset: dict[UUID, PriceHistory],
+) -> PortfolioDashboard:
+    assets_by_id = {asset.id: asset for asset in portfolio.assets}
+    return PortfolioDashboard(
+        portfolio=_to_portfolio_details(portfolio),
+        positions=tuple(
+            _to_valued_asset_position_view(
+                position,
+                assets_by_id=assets_by_id,
+                latest_prices_by_asset=latest_prices_by_asset,
+            )
+            for position in valuation.positions
+        ),
+        currencies=tuple(
+            _to_currency_valuation_view(currency_valuation)
+            for currency_valuation in valuation.currencies
+        ),
+    )
+
+
+def _to_valued_asset_position_view(
+    position: ValuedAssetPosition,
+    *,
+    assets_by_id: dict[UUID, Asset],
+    latest_prices_by_asset: dict[UUID, PriceHistory],
+) -> ValuedAssetPositionView:
+    asset = assets_by_id.get(position.asset_id)
+    if asset is None:
+        raise PositionAssetNotFoundError(position.asset_id)
+
+    price_observed_at = None
+    if position.market_price is not None:
+        latest_price = latest_prices_by_asset.get(position.asset_id)
+        if latest_price is None:
+            raise MissingMarketPriceError(position.asset_id)
+        price_observed_at = latest_price.observed_at
+
+    return ValuedAssetPositionView(
+        asset_id=position.asset_id,
+        symbol=asset.symbol,
+        name=asset.name,
+        asset_type=asset.asset_type,
+        currency=position.currency,
+        quantity=position.quantity,
+        average_cost=position.average_cost,
+        cost_basis=position.cost_basis,
+        market_price=position.market_price,
+        price_observed_at=price_observed_at,
+        market_value=position.market_value,
+        realized_pnl=position.realized_pnl,
+        unrealized_pnl=position.unrealized_pnl,
+        total_pnl=position.total_pnl,
+    )
+
+
+def _to_currency_valuation_view(
+    valuation: CurrencyValuation,
+) -> CurrencyValuationView:
+    return CurrencyValuationView(
+        currency=valuation.currency,
+        cost_basis=valuation.cost_basis,
+        market_value=valuation.market_value,
+        realized_pnl=valuation.realized_pnl,
+        unrealized_pnl=valuation.unrealized_pnl,
+        total_pnl=valuation.total_pnl,
+    )
+
+
 def _to_asset_position_view(asset: Asset) -> AssetPositionView:
     return AssetPositionView(
         id=asset.id,
@@ -355,6 +493,7 @@ __all__ = [
     "DefaultAssetApplicationService",
     "DefaultMarketPriceApplicationService",
     "DefaultPortfolioApplicationService",
+    "DefaultPortfolioDashboardQueryService",
     "MarketPriceApplicationService",
     "PortfolioApplicationService",
     "PortfolioDashboardQueryService",
