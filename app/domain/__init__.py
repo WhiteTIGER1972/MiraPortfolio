@@ -18,8 +18,14 @@ from app.domain.events import (
     SnapshotCreated,
     TransactionAdded,
 )
+from app.domain.exceptions import (
+    InsufficientPositionError,
+    UnsupportedTransactionTypeError,
+)
+from app.domain.services import PortfolioPositionCalculator
 from app.domain.value_objects import (
     ISIN,
+    AssetPosition,
     Currency,
     CurrencyCode,
     Money,
@@ -30,6 +36,7 @@ from app.domain.value_objects import (
 
 __all__ = [
     "Asset",
+    "AssetPosition",
     "AssetType",
     "Currency",
     "CurrencyCode",
@@ -37,10 +44,12 @@ __all__ = [
     "DomainEvent",
     "EventReasonCode",
     "ISIN",
+    "InsufficientPositionError",
     "Money",
     "Percentage",
     "Portfolio",
     "PortfolioMetrics",
+    "PortfolioPositionCalculator",
     "PortfolioUpdated",
     "PriceHistory",
     "RiskScore",
@@ -50,4 +59,5 @@ __all__ = [
     "Transaction",
     "TransactionAdded",
     "TransactionType",
+    "UnsupportedTransactionTypeError",
 ]

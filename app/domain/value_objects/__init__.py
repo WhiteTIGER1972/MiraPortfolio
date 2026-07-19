@@ -1,5 +1,6 @@
 """Domain value-object exports."""
 
+from app.domain.value_objects.asset_position import AssetPosition
 from app.domain.value_objects.currency import Currency
 from app.domain.value_objects.financial import (
     ISIN,
@@ -11,6 +12,7 @@ from app.domain.value_objects.financial import (
 )
 
 __all__ = [
+    "AssetPosition",
     "Currency",
     "CurrencyCode",
     "ISIN",
