@@ -22,8 +22,19 @@ from PySide6.QtWidgets import (
 
 from app.application.commands import CreateAssetCommand, CreatePortfolioCommand
 from app.application.exceptions import ValidationError
-from app.application.queries import GetPortfolioQuery, ListAssetsQuery, ListPortfoliosQuery
-from app.application.results import AssetView, MarketPriceView, PortfolioDetails, PortfolioSummary
+from app.application.queries import (
+    GetPortfolioDashboardQuery,
+    GetPortfolioQuery,
+    ListAssetsQuery,
+    ListPortfoliosQuery,
+)
+from app.application.results import (
+    AssetView,
+    MarketPriceView,
+    PortfolioDashboard,
+    PortfolioDetails,
+    PortfolioSummary,
+)
 from app.core.container import Container
 from app.domain.entities.asset import AssetType
 from app.domain.value_objects.currency import Currency
@@ -172,6 +183,22 @@ class FakeMarketPriceService:
         self.record_result: MarketPriceView | None = None
 
 
+class FakeDashboardService:
+    """Return empty calculated dashboards around fake persisted details."""
+
+    def __init__(self, portfolios: FakePortfolioService) -> None:
+        self._portfolios = portfolios
+        self.calls: list[GetPortfolioDashboardQuery] = []
+
+    def get_dashboard(self, query: GetPortfolioDashboardQuery) -> PortfolioDashboard:
+        self.calls.append(query)
+        return PortfolioDashboard(
+            portfolio=self._portfolios.details_by_id[query.portfolio_id],
+            positions=(),
+            currencies=(),
+        )
+
+
 class WindowFactory:
     """Construct and clean up MainWindows around lightweight services."""
 
@@ -184,8 +211,10 @@ class WindowFactory:
         portfolios: FakePortfolioService,
         assets: FakeAssetService,
         market_prices: FakeMarketPriceService | None = None,
+        dashboards: FakeDashboardService | None = None,
     ) -> MainWindow:
         price_service = market_prices or FakeMarketPriceService()
+        dashboard_service = dashboards or FakeDashboardService(portfolios)
         container = cast(
             Container,
             SimpleNamespace(
@@ -193,6 +222,7 @@ class WindowFactory:
                 portfolio_application_service=portfolios,
                 asset_application_service=assets,
                 market_price_application_service=price_service,
+                portfolio_dashboard_query_service=dashboard_service,
             ),
         )
         window = MainWindow(container)
@@ -333,8 +363,8 @@ def test_empty_state_disables_selector_without_placeholder_rows(
     assert asset_empty is not None
     assert asset_empty.text() == "No assets have been created yet."
     assert asset_empty.isVisibleTo(window)
-    assert window.findChild(QLabel, "futureWorkflowState").text() == (
-        "Calculated valuation will be added in the next Alpha step."
+    assert window.findChild(QLabel, "valuationState").text() == (
+        "Create or select a portfolio to view valuation."
     )
     assert window.findChild(QLabel, "selectedPortfolioName").text() == ("No portfolio selected")
     assert window.findChild(type(window._new_portfolio_button), "newPortfolioButton").isEnabled()
@@ -349,7 +379,12 @@ def test_portfolio_creation_refreshes_once_and_selects_returned_uuid(
     portfolio_service = FakePortfolioService((existing,))
     portfolio_service.create_result = portfolio_details(created_summary)
     asset_service = FakeAssetService()
-    window = make_window(portfolio_service, asset_service)
+    dashboard_service = FakeDashboardService(portfolio_service)
+    window = make_window(
+        portfolio_service,
+        asset_service,
+        dashboards=dashboard_service,
+    )
 
     class AcceptedPortfolioDialog:
         def __init__(self, parent: MainWindow) -> None:
@@ -376,6 +411,10 @@ def test_portfolio_creation_refreshes_once_and_selects_returned_uuid(
     assert portfolio_service.get_calls == [
         GetPortfolioQuery(portfolio_id=existing.id),
         GetPortfolioQuery(portfolio_id=created_summary.id),
+    ]
+    assert dashboard_service.calls == [
+        GetPortfolioDashboardQuery(portfolio_id=existing.id),
+        GetPortfolioDashboardQuery(portfolio_id=created_summary.id),
     ]
     assert len(asset_service.list_calls) == 1
     assert asset_service.create_calls == []
@@ -672,7 +711,7 @@ def test_main_window_smoke_and_visible_text_are_truthful(
     assert window.minimumHeight() >= 700
     assert "Portfolio setup" in visible_text
     assert "Asset registry" in visible_text
-    assert "Calculated valuation will be added" in visible_text
+    assert "Calculated valuation" in visible_text
     for fabricated in (
         "THYAO",
         "TUPRS",
@@ -707,13 +746,9 @@ def test_ui_source_respects_management_service_boundary() -> None:
         "container.session_factory",
         "container.unit_of_work_factory",
         "container.database_manager",
-        "container.portfolio_dashboard_query_service",
     ):
         assert forbidden_container_access not in source
-    for forbidden_workflow in (
-        "GetPortfolioDashboardQuery",
-        "GetLatestMarketPriceQuery",
-    ):
+    for forbidden_workflow in ("GetLatestMarketPriceQuery",):
         assert forbidden_workflow not in source
     for forbidden_demo in (
         "THYAO",

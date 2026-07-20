@@ -29,10 +29,16 @@ from app.application.commands import (
     SellAssetCommand,
 )
 from app.application.exceptions import ApplicationError
-from app.application.queries import GetPortfolioQuery, ListAssetsQuery, ListPortfoliosQuery
+from app.application.queries import (
+    GetPortfolioDashboardQuery,
+    GetPortfolioQuery,
+    ListAssetsQuery,
+    ListPortfoliosQuery,
+)
 from app.application.results import (
     AssetPositionView,
     AssetView,
+    PortfolioDashboard,
     PortfolioDetails,
     PortfolioSummary,
     TransactionView,
@@ -41,12 +47,21 @@ from app.application.services import (
     AssetApplicationService,
     MarketPriceApplicationService,
     PortfolioApplicationService,
+    PortfolioDashboardQueryService,
 )
 from app.core.container import Container
 from app.core.exceptions import RepositoryError
 from app.domain.entities.asset import AssetType
 from app.domain.entities.transaction import TransactionType
-from app.domain.exceptions import DomainError
+from app.domain.exceptions import (
+    DomainError,
+    InsufficientPositionError,
+    InvalidMarketPriceError,
+    MissingMarketPriceError,
+    PositionAssetNotFoundError,
+    UnsupportedTransactionTypeError,
+)
+from app.ui.components.portfolio_valuation_panel import PortfolioValuationPanel
 from app.ui.components.widgets import (
     CardWidget,
     ModernTable,
@@ -84,10 +99,14 @@ class MainWindow(QMainWindow):
         self._market_price_service: MarketPriceApplicationService = (
             container.market_price_application_service
         )
+        self._dashboard_service: PortfolioDashboardQueryService = (
+            container.portfolio_dashboard_query_service
+        )
         self._portfolios: tuple[PortfolioSummary, ...] = ()
         self._assets: tuple[AssetView, ...] = ()
         self._selected_portfolio_id: UUID | None = None
         self._selected_portfolio_details: PortfolioDetails | None = None
+        self._portfolio_dashboard: PortfolioDashboard | None = None
         self._selected_asset_id: UUID | None = None
         self._selected_transaction_id: UUID | None = None
 
@@ -102,7 +121,10 @@ class MainWindow(QMainWindow):
         details_ready = (
             self._selected_portfolio_id is None or self._selected_portfolio_details is not None
         )
-        if portfolios_loaded and assets_loaded and details_ready:
+        valuation_ready = (
+            self._selected_portfolio_id is None or self._portfolio_dashboard is not None
+        )
+        if portfolios_loaded and assets_loaded and details_ready and valuation_ready:
             self.statusBar().showMessage("Ready")
 
     def _build_toolbar(self) -> None:
@@ -166,8 +188,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(12, 18, 12, 18)
         layout.setSpacing(8)
         for name, active in (
-            ("Setup & transactions", True),
-            ("Valuation — coming later", False),
+            ("Portfolio workspace", True),
             ("Reports — coming later", False),
         ):
             item = QLabel(name, rail)
@@ -209,8 +230,12 @@ class MainWindow(QMainWindow):
         workflow_splitter.setObjectName("workflowSplitter")
         workflow_splitter.addWidget(self._asset_registry_card())
         workflow_splitter.addWidget(self._transaction_card())
+        self._valuation_panel = PortfolioValuationPanel(workflow_splitter)
+        self._valuation_panel.refresh_requested.connect(self._manual_refresh_dashboard)
+        workflow_splitter.addWidget(self._valuation_panel)
         workflow_splitter.setStretchFactor(0, 2)
         workflow_splitter.setStretchFactor(1, 3)
+        workflow_splitter.setStretchFactor(2, 4)
         layout.addWidget(workflow_splitter, 1)
         return content
 
@@ -342,14 +367,6 @@ class MainWindow(QMainWindow):
         self._transaction_table.setMinimumHeight(180)
         self._transaction_table.itemSelectionChanged.connect(self._on_transaction_selection_changed)
         layout.addWidget(self._transaction_table, 1)
-
-        valuation_placeholder = QLabel(
-            "Calculated valuation will be added in the next Alpha step.",
-            card,
-        )
-        valuation_placeholder.setObjectName("futureWorkflowState")
-        valuation_placeholder.setStyleSheet(f"color: {Colors.MUTED};")
-        layout.addWidget(valuation_placeholder)
         return card
 
     def _refresh_portfolios(
@@ -492,6 +509,7 @@ class MainWindow(QMainWindow):
         if selected is None:
             self._selected_portfolio_id = None
             self._selected_portfolio_details = None
+            self._clear_dashboard("Create or select a portfolio to view valuation.")
             self._portfolio_name_label.setText("No portfolio selected")
             self._portfolio_details_label.setText("Create or select a portfolio to begin.")
             self._portfolio_empty_label.setText(
@@ -517,6 +535,7 @@ class MainWindow(QMainWindow):
         )
         if identity_changed or not details_match_selection:
             self._selected_portfolio_details = None
+            self._clear_dashboard("Loading calculated valuation…")
             self._render_transactions()
             self._load_portfolio_details(selected.id)
         else:
@@ -554,6 +573,9 @@ class MainWindow(QMainWindow):
             if self._selected_portfolio_id == portfolio_id:
                 self._selected_portfolio_details = None
                 self._render_transactions()
+                self._clear_dashboard(
+                    "Valuation unavailable because Portfolio details could not be loaded."
+                )
                 self._transaction_empty_label.setText("Unable to load Portfolio details.")
             self._show_error(
                 "Unable to load Portfolio details",
@@ -566,6 +588,9 @@ class MainWindow(QMainWindow):
             if self._selected_portfolio_id == portfolio_id:
                 self._selected_portfolio_details = None
                 self._render_transactions()
+                self._clear_dashboard(
+                    "Valuation unavailable because Portfolio details could not be loaded."
+                )
                 self._transaction_empty_label.setText("Unable to load Portfolio details.")
             self._show_error(
                 "Unable to load Portfolio details",
@@ -583,6 +608,7 @@ class MainWindow(QMainWindow):
             if self._selected_portfolio_id == portfolio_id:
                 self._selected_portfolio_details = None
                 self._render_transactions()
+                self._clear_dashboard("Valuation unavailable due to inconsistent Portfolio data.")
             self._show_error(
                 "Unable to load Portfolio details",
                 "The selected Portfolio returned inconsistent details.",
@@ -593,6 +619,7 @@ class MainWindow(QMainWindow):
             return False
 
         self._apply_portfolio_details(details, selected_transaction_id)
+        self._refresh_dashboard()
         return True
 
     def _apply_portfolio_details(
@@ -609,6 +636,104 @@ class MainWindow(QMainWindow):
             return
         self._selected_portfolio_details = details
         self._render_transactions(selected_transaction_id)
+
+    def _refresh_dashboard(self, *, show_success_status: bool = False) -> bool:
+        portfolio_id = self._selected_portfolio_id
+        if portfolio_id is None:
+            self._clear_dashboard("Create or select a portfolio to view valuation.")
+            return False
+        try:
+            dashboard = self._dashboard_service.get_dashboard(
+                GetPortfolioDashboardQuery(portfolio_id=portfolio_id)
+            )
+        except MissingMarketPriceError as error:
+            asset_label = self._missing_price_asset_label(error.asset_id)
+            self._portfolio_dashboard = None
+            self._valuation_panel.show_missing_price(
+                f"Valuation unavailable. Record a current price for {asset_label}."
+            )
+            self.statusBar().showMessage("Valuation unavailable — record a current Asset price")
+            return False
+        except (
+            InvalidMarketPriceError,
+            PositionAssetNotFoundError,
+            InsufficientPositionError,
+            UnsupportedTransactionTypeError,
+        ) as error:
+            logger.warning("Portfolio valuation rejected persisted state: {}", error)
+            self._clear_dashboard("Calculated valuation is unavailable.")
+            self._show_error(
+                "Unable to calculate valuation",
+                f"The selected Portfolio cannot be valued: {error}",
+                "Unable to calculate valuation",
+            )
+            return False
+        except (
+            ApplicationError,
+            DomainError,
+            RepositoryError,
+            InvalidOperation,
+            ValueError,
+            TypeError,
+        ) as error:
+            self._clear_dashboard("Calculated valuation is unavailable.")
+            self._show_error(
+                "Unable to calculate valuation",
+                f"The selected Portfolio valuation could not be loaded: {error}",
+                "Unable to calculate valuation",
+            )
+            return False
+        except Exception:
+            logger.exception("Unexpected failure while loading calculated valuation")
+            self._clear_dashboard("Calculated valuation is unavailable.")
+            self._show_error(
+                "Unable to calculate valuation",
+                "An unexpected error prevented the valuation from loading.",
+                "Unable to calculate valuation",
+            )
+            return False
+
+        if dashboard.portfolio.id != portfolio_id:
+            logger.error(
+                "Dashboard identity mismatch: selected {}, received {}",
+                portfolio_id,
+                dashboard.portfolio.id,
+            )
+            self._clear_dashboard("Calculated valuation is unavailable.")
+            self._show_error(
+                "Unable to calculate valuation",
+                "The valuation service returned data for a different Portfolio.",
+                "Unable to calculate valuation",
+            )
+            return False
+
+        self._portfolio_dashboard = dashboard
+        self._valuation_panel.show_dashboard(dashboard)
+        if show_success_status:
+            self.statusBar().showMessage("Valuation refreshed")
+        return True
+
+    def _manual_refresh_dashboard(self) -> None:
+        self._refresh_dashboard(show_success_status=True)
+
+    def _clear_dashboard(self, message: str) -> None:
+        self._portfolio_dashboard = None
+        self._valuation_panel.show_empty(message)
+
+    def _missing_price_asset_label(self, asset_id: UUID) -> str:
+        details = self._selected_portfolio_details
+        if details is not None:
+            portfolio_asset = next(
+                (asset for asset in details.assets if asset.id == asset_id),
+                None,
+            )
+            if portfolio_asset is not None:
+                return portfolio_asset.symbol
+        global_asset = next(
+            (asset for asset in self._assets if asset.id == asset_id),
+            None,
+        )
+        return global_asset.symbol if global_asset is not None else str(asset_id)
 
     def _render_transactions(
         self,
@@ -713,6 +838,7 @@ class MainWindow(QMainWindow):
         self._delete_transaction_button.setEnabled(
             has_portfolio and self._selected_transaction_id is not None
         )
+        self._valuation_panel.set_refresh_enabled(has_portfolio)
 
     @staticmethod
     def _asset_display_label(asset: AssetView | AssetPositionView) -> str:
@@ -776,7 +902,11 @@ class MainWindow(QMainWindow):
             return
 
         if self._load_portfolio_details(portfolio_id, transaction.id):
-            self.statusBar().showMessage("Buy transaction recorded")
+            self.statusBar().showMessage(
+                "Buy transaction recorded"
+                if self._portfolio_dashboard is not None
+                else "Buy transaction recorded; valuation unavailable"
+            )
         else:
             self.statusBar().showMessage(
                 "Buy recorded, but transaction history could not be refreshed"
@@ -833,7 +963,11 @@ class MainWindow(QMainWindow):
             return
 
         if self._load_portfolio_details(portfolio_id, transaction.id):
-            self.statusBar().showMessage("Sell transaction recorded")
+            self.statusBar().showMessage(
+                "Sell transaction recorded"
+                if self._portfolio_dashboard is not None
+                else "Sell transaction recorded; valuation unavailable"
+            )
         else:
             self.statusBar().showMessage(
                 "Sell recorded, but transaction history could not be refreshed"
@@ -895,7 +1029,12 @@ class MainWindow(QMainWindow):
             return
 
         self._apply_portfolio_details(updated)
-        self.statusBar().showMessage("Transaction deleted")
+        dashboard_refreshed = self._refresh_dashboard()
+        self.statusBar().showMessage(
+            "Transaction deleted"
+            if dashboard_refreshed
+            else "Transaction deleted; valuation unavailable"
+        )
 
     def _transaction_description(
         self,
@@ -963,8 +1102,13 @@ class MainWindow(QMainWindow):
             None,
         )
         asset_label = asset.symbol if asset is not None else "Asset"
-        self.statusBar().showMessage(
+        success_message = (
             f"Price recorded for {asset_label}: {recorded.price} {recorded.currency.value}"
+        )
+        should_refresh_dashboard = self._selected_portfolio_id is not None
+        dashboard_refreshed = self._refresh_dashboard() if should_refresh_dashboard else True
+        self.statusBar().showMessage(
+            success_message if dashboard_refreshed else f"{success_message}; valuation unavailable"
         )
 
     def _create_portfolio(self) -> None:
@@ -997,7 +1141,11 @@ class MainWindow(QMainWindow):
             and self._selected_portfolio_details is not None
         )
         if portfolios_refreshed and details_loaded:
-            self.statusBar().showMessage("Portfolio created")
+            self.statusBar().showMessage(
+                "Portfolio created"
+                if self._portfolio_dashboard is not None
+                else "Portfolio created; valuation unavailable"
+            )
         elif portfolios_refreshed:
             self.statusBar().showMessage("Portfolio created, but its details could not be loaded")
         else:

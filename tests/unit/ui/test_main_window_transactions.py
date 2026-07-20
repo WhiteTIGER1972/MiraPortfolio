@@ -1,6 +1,6 @@
 """Focused transaction and manual-price workflow tests."""
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -33,6 +33,7 @@ from app.application.commands import (
 from app.application.exceptions import ValidationError
 from app.application.queries import (
     GetLatestMarketPriceQuery,
+    GetPortfolioDashboardQuery,
     GetPortfolioQuery,
     ListAssetsQuery,
     ListPortfoliosQuery,
@@ -41,6 +42,7 @@ from app.application.results import (
     AssetPositionView,
     AssetView,
     MarketPriceView,
+    PortfolioDashboard,
     PortfolioDetails,
     PortfolioSummary,
     TransactionView,
@@ -275,7 +277,39 @@ class StatefulMarketPriceService:
         query: GetLatestMarketPriceQuery,
     ) -> MarketPriceView | None:
         self.latest_calls.append(query)
-        raise AssertionError("MainWindow must not read latest prices in Commit 8.")
+        raise AssertionError("MainWindow must not read latest prices directly.")
+
+
+class StatefulDashboardService:
+    """Return empty calculated dashboards around fake persisted details."""
+
+    def __init__(self, portfolios: StatefulPortfolioService) -> None:
+        self._portfolios = portfolios
+        self.calls: list[GetPortfolioDashboardQuery] = []
+        self.error: Exception | None = None
+        self.results_by_id: dict[UUID, PortfolioDashboard] = {}
+        self.queued_results: list[PortfolioDashboard | Exception] = []
+        self.before_get: Callable[[GetPortfolioDashboardQuery], None] | None = None
+
+    def get_dashboard(self, query: GetPortfolioDashboardQuery) -> PortfolioDashboard:
+        self.calls.append(query)
+        if self.before_get is not None:
+            self.before_get(query)
+        if self.queued_results:
+            queued = self.queued_results.pop(0)
+            if isinstance(queued, Exception):
+                raise queued
+            return queued
+        if self.error is not None:
+            raise self.error
+        result = self.results_by_id.get(query.portfolio_id)
+        if result is not None:
+            return result
+        return PortfolioDashboard(
+            portfolio=self._portfolios.details_by_id[query.portfolio_id],
+            positions=(),
+            currencies=(),
+        )
 
 
 class TransactionWindowFactory:
@@ -290,7 +324,9 @@ class TransactionWindowFactory:
         portfolios: StatefulPortfolioService,
         assets: StatefulAssetService,
         prices: StatefulMarketPriceService,
+        dashboards: StatefulDashboardService | None = None,
     ) -> MainWindow:
+        dashboard_service = dashboards or StatefulDashboardService(portfolios)
         container = cast(
             Container,
             SimpleNamespace(
@@ -298,6 +334,7 @@ class TransactionWindowFactory:
                 portfolio_application_service=portfolios,
                 asset_application_service=assets,
                 market_price_application_service=prices,
+                portfolio_dashboard_query_service=dashboard_service,
             ),
         )
         window = MainWindow(container)
@@ -438,7 +475,13 @@ def test_selection_loads_once_per_identity_and_failure_clears_stale_history(
     )
     asset_service = StatefulAssetService((asset,))
     price_service = StatefulMarketPriceService()
-    window = make_window(portfolio_service, asset_service, price_service)
+    dashboard_service = StatefulDashboardService(portfolio_service)
+    window = make_window(
+        portfolio_service,
+        asset_service,
+        price_service,
+        dashboard_service,
+    )
     selector = window.findChild(QComboBox, "portfolioSelector")
     table = window.findChild(QTableWidget, "transactionTable")
 
@@ -448,8 +491,13 @@ def test_selection_loads_once_per_identity_and_failure_clears_stale_history(
         GetPortfolioQuery(portfolio_id=first.id),
         GetPortfolioQuery(portfolio_id=second.id),
     ]
+    assert dashboard_service.calls == [
+        GetPortfolioDashboardQuery(portfolio_id=first.id),
+        GetPortfolioDashboardQuery(portfolio_id=second.id),
+    ]
     assert window._refresh_portfolios()
     assert len(portfolio_service.get_calls) == 2
+    assert len(dashboard_service.calls) == 2
 
     portfolio_service.get_error = ValidationError("Details unavailable.")
     selector.setCurrentIndex(0)
@@ -460,6 +508,7 @@ def test_selection_loads_once_per_identity_and_failure_clears_stale_history(
     assert table.rowCount() == 0
     assert window.findChild(QTableWidget, "assetRegistryTable").rowCount() == 1
     assert len(errors) == 1
+    assert len(dashboard_service.calls) == 2
     assert "Details unavailable." in errors[0][2]
     assert window.statusBar().currentMessage() == "Unable to load Portfolio details"
     assert window.findChild(QPushButton, "buyAssetButton").isEnabled()
@@ -561,7 +610,13 @@ def test_buy_success_uses_global_assets_and_refreshes_details_once(
     portfolio_service.details_after_buy = refreshed
     asset_service = StatefulAssetService((first, second))
     price_service = StatefulMarketPriceService()
-    window = make_window(portfolio_service, asset_service, price_service)
+    dashboard_service = StatefulDashboardService(portfolio_service)
+    window = make_window(
+        portfolio_service,
+        asset_service,
+        price_service,
+        dashboard_service,
+    )
 
     AcceptedTradeDialog.expected_type = TransactionType.BUY
     AcceptedTradeDialog.expected_assets = (first, second)
@@ -589,6 +644,10 @@ def test_buy_success_uses_global_assets_and_refreshes_details_once(
     assert portfolio_service.list_calls == [ListPortfoliosQuery()]
     assert asset_service.list_calls == [ListAssetsQuery()]
     assert price_service.record_calls == []
+    assert dashboard_service.calls == [
+        GetPortfolioDashboardQuery(portfolio_id=portfolio.id),
+        GetPortfolioDashboardQuery(portfolio_id=portfolio.id),
+    ]
     assert window._selected_portfolio_id == portfolio.id
     assert window._selected_transaction_id == created.id
     assert window.findChild(QTableWidget, "transactionTable").currentRow() == 0
@@ -610,10 +669,12 @@ def test_buy_cancel_parse_failure_and_service_failure_are_atomic(
     )
     portfolio_service = StatefulPortfolioService((portfolio,), (current,))
     asset_service = StatefulAssetService((asset,))
+    dashboard_service = StatefulDashboardService(portfolio_service)
     window = make_window(
         portfolio_service,
         asset_service,
         StatefulMarketPriceService(),
+        dashboard_service,
     )
 
     class RejectedDialog(AcceptedTradeDialog):
@@ -627,6 +688,7 @@ def test_buy_cancel_parse_failure_and_service_failure_are_atomic(
     window._buy_asset()
     assert portfolio_service.buy_calls == []
     assert len(portfolio_service.get_calls) == 1
+    assert len(dashboard_service.calls) == 1
 
     class InvalidDialog(RejectedDialog):
         def exec(self) -> QDialog.DialogCode:
@@ -639,6 +701,7 @@ def test_buy_cancel_parse_failure_and_service_failure_are_atomic(
     window._buy_asset()
     assert portfolio_service.buy_calls == []
     assert len(portfolio_service.get_calls) == 1
+    assert len(dashboard_service.calls) == 1
     assert errors[-1][1] == "Unable to record transaction"
 
     AcceptedTradeDialog.expected_type = TransactionType.BUY
@@ -651,6 +714,7 @@ def test_buy_cancel_parse_failure_and_service_failure_are_atomic(
 
     assert len(portfolio_service.buy_calls) == 1
     assert len(portfolio_service.get_calls) == 1
+    assert len(dashboard_service.calls) == 1
     assert window.findChild(QTableWidget, "transactionTable").rowCount() == 1
     assert window.findChild(QTableWidget, "transactionTable").item(0, 0).data(
         Qt.ItemDataRole.UserRole
@@ -687,10 +751,12 @@ def test_sell_success_supplies_only_portfolio_assets_without_position_math(
     portfolio_service.sell_result = created_sell
     portfolio_service.details_after_sell = refreshed
     asset_service = StatefulAssetService((owned, unowned))
+    dashboard_service = StatefulDashboardService(portfolio_service)
     window = make_window(
         portfolio_service,
         asset_service,
         StatefulMarketPriceService(),
+        dashboard_service,
     )
 
     AcceptedTradeDialog.expected_type = TransactionType.SELL
@@ -713,6 +779,7 @@ def test_sell_success_supplies_only_portfolio_assets_without_position_math(
     ]
     assert len(portfolio_service.get_calls) == 2
     assert asset_service.list_calls == [ListAssetsQuery()]
+    assert len(dashboard_service.calls) == 2
     assert window._selected_transaction_id == created_sell.id
     assert window.statusBar().currentMessage() == "Sell transaction recorded"
 
@@ -728,10 +795,12 @@ def test_sell_cancel_and_service_failure_leave_history_unchanged(
     existing = transaction(asset.id, TransactionType.BUY)
     current = details(portfolio, assets=(position,), transactions=(existing,))
     portfolio_service = StatefulPortfolioService((portfolio,), (current,))
+    dashboard_service = StatefulDashboardService(portfolio_service)
     window = make_window(
         portfolio_service,
         StatefulAssetService((asset,)),
         StatefulMarketPriceService(),
+        dashboard_service,
     )
 
     class RejectedSellDialog(AcceptedTradeDialog):
@@ -745,6 +814,7 @@ def test_sell_cancel_and_service_failure_leave_history_unchanged(
     window._sell_asset()
     assert portfolio_service.sell_calls == []
     assert len(portfolio_service.get_calls) == 1
+    assert len(dashboard_service.calls) == 1
 
     AcceptedTradeDialog.expected_type = TransactionType.SELL
     AcceptedTradeDialog.expected_assets = (position,)
@@ -757,6 +827,7 @@ def test_sell_cancel_and_service_failure_leave_history_unchanged(
     table = window.findChild(QTableWidget, "transactionTable")
     assert len(portfolio_service.sell_calls) == 1
     assert len(portfolio_service.get_calls) == 1
+    assert len(dashboard_service.calls) == 1
     assert table.rowCount() == 1
     assert table.item(0, 0).data(Qt.ItemDataRole.UserRole) == str(existing.id)
     assert "SELL rejected." in errors[-1][2]
@@ -797,10 +868,12 @@ def test_delete_uses_row_uuid_and_returned_details_without_follow_up_read(
     after_delete = details(portfolio, assets=(position,))
     portfolio_service = StatefulPortfolioService((portfolio,), (initial,))
     portfolio_service.delete_result = after_delete
+    dashboard_service = StatefulDashboardService(portfolio_service)
     window = make_window(
         portfolio_service,
         StatefulAssetService((asset,)),
         StatefulMarketPriceService(),
+        dashboard_service,
     )
     table = window.findChild(QTableWidget, "transactionTable")
     table.selectRow(0)
@@ -820,6 +893,7 @@ def test_delete_uses_row_uuid_and_returned_details_without_follow_up_read(
     ]
     assert portfolio_service.get_calls == [GetPortfolioQuery(portfolio_id=portfolio.id)]
     assert portfolio_service.list_calls == [ListPortfoliosQuery()]
+    assert len(dashboard_service.calls) == 2
     assert window._selected_portfolio_id == portfolio.id
     assert window._selected_portfolio_details == after_delete
     assert table.rowCount() == 0
@@ -842,10 +916,12 @@ def test_delete_cancel_and_failure_preserve_existing_row_and_selection(
         transactions=(existing,),
     )
     portfolio_service = StatefulPortfolioService((portfolio,), (initial,))
+    dashboard_service = StatefulDashboardService(portfolio_service)
     window = make_window(
         portfolio_service,
         StatefulAssetService((asset,)),
         StatefulMarketPriceService(),
+        dashboard_service,
     )
     table = window.findChild(QTableWidget, "transactionTable")
     table.selectRow(0)
@@ -857,6 +933,7 @@ def test_delete_cancel_and_failure_preserve_existing_row_and_selection(
     )
     window._delete_selected_transaction()
     assert portfolio_service.delete_calls == []
+    assert len(dashboard_service.calls) == 1
     assert table.rowCount() == 1
     assert window._selected_transaction_id == existing.id
 
@@ -869,6 +946,7 @@ def test_delete_cancel_and_failure_preserve_existing_row_and_selection(
     window._delete_selected_transaction()
     assert len(portfolio_service.delete_calls) == 1
     assert len(portfolio_service.get_calls) == 1
+    assert len(dashboard_service.calls) == 1
     assert table.rowCount() == 1
     assert window._selected_transaction_id == existing.id
     assert "Delete rejected." in errors[-1][2]
@@ -900,7 +978,7 @@ class AcceptedPriceDialog:
         return PRICE_AT
 
 
-def test_manual_zero_price_writes_once_without_reads_or_ui_refresh(
+def test_manual_zero_price_writes_once_without_follow_up_reads_or_list_refresh(
     monkeypatch: pytest.MonkeyPatch,
     make_window: TransactionWindowFactory,
 ) -> None:
@@ -916,7 +994,13 @@ def test_manual_zero_price_writes_once_without_reads_or_ui_refresh(
         currency=Currency.GBP,
         observed_at=PRICE_AT,
     )
-    window = make_window(portfolio_service, asset_service, price_service)
+    dashboard_service = StatefulDashboardService(portfolio_service)
+    window = make_window(
+        portfolio_service,
+        asset_service,
+        price_service,
+        dashboard_service,
+    )
 
     AcceptedPriceDialog.expected_assets = (asset,)
     AcceptedPriceDialog.expected_parent = window
@@ -937,6 +1021,7 @@ def test_manual_zero_price_writes_once_without_reads_or_ui_refresh(
         )
     ]
     assert price_service.latest_calls == []
+    assert len(dashboard_service.calls) == 2
     assert portfolio_service.get_calls == [GetPortfolioQuery(portfolio_id=portfolio.id)]
     assert portfolio_service.list_calls == [ListPortfoliosQuery()]
     assert asset_service.list_calls == [ListAssetsQuery()]
@@ -954,7 +1039,13 @@ def test_manual_price_cancel_and_failure_have_no_follow_up_or_state_mutation(
     portfolio_service = StatefulPortfolioService((portfolio,), (details(portfolio),))
     asset_service = StatefulAssetService((asset,))
     price_service = StatefulMarketPriceService()
-    window = make_window(portfolio_service, asset_service, price_service)
+    dashboard_service = StatefulDashboardService(portfolio_service)
+    window = make_window(
+        portfolio_service,
+        asset_service,
+        price_service,
+        dashboard_service,
+    )
 
     class RejectedPriceDialog(AcceptedPriceDialog):
         def exec(self) -> QDialog.DialogCode:
@@ -969,6 +1060,7 @@ def test_manual_price_cancel_and_failure_have_no_follow_up_or_state_mutation(
     )
     window._record_market_price()
     assert price_service.record_calls == []
+    assert len(dashboard_service.calls) == 1
 
     AcceptedPriceDialog.expected_assets = (asset,)
     AcceptedPriceDialog.expected_parent = window
@@ -983,6 +1075,7 @@ def test_manual_price_cancel_and_failure_have_no_follow_up_or_state_mutation(
 
     assert len(price_service.record_calls) == 1
     assert price_service.latest_calls == []
+    assert len(dashboard_service.calls) == 1
     assert len(portfolio_service.get_calls) == 1
     assert asset_service.list_calls == [ListAssetsQuery()]
     assert "Price rejected." in errors[-1][2]
@@ -1090,7 +1183,7 @@ def test_stateful_management_trade_price_delete_smoke(
     assert len(portfolio_service.delete_calls) == 1
 
 
-def test_commit_8_ui_source_has_no_dashboard_corporate_formula_or_persistence() -> None:
+def test_ui_source_has_no_calculator_corporate_formula_or_persistence() -> None:
     source = Path(main_window_module.__file__).read_text(encoding="utf-8")
 
     for forbidden in (
@@ -1100,9 +1193,6 @@ def test_commit_8_ui_source_has_no_dashboard_corporate_formula_or_persistence() 
         "repositories",
         "UnitOfWork",
         "DatabaseManager",
-        "portfolio_dashboard_query_service",
-        "GetPortfolioDashboardQuery",
-        "PortfolioDashboard",
         "ValuedAssetPositionView",
         "CurrencyValuationView",
         "PortfolioPositionCalculator",
