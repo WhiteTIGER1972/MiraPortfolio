@@ -332,6 +332,19 @@ class SQLAlchemyPriceHistoryRepository(_DomainRepository[PriceHistory, PriceHist
         self._models.add(price_history_to_model(entity))
         return entity
 
+    def get_latest_for_asset(self, asset_id: UUID) -> PriceHistory | None:
+        statement: Select[tuple[PriceHistoryModel]] = (
+            select(PriceHistoryModel)
+            .where(PriceHistoryModel.asset_id == asset_id)
+            .order_by(
+                PriceHistoryModel.observed_at.desc(),
+                PriceHistoryModel.id.desc(),
+            )
+            .limit(1)
+        )
+        model = self._session.scalar(statement)
+        return price_history_to_domain(model) if model is not None else None
+
     def delete(self, entity: PriceHistory) -> None:
         self._delete_by_id(entity.id)
 

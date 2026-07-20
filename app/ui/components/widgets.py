@@ -94,11 +94,12 @@ class ModernTable(QTableWidget):
         self.verticalHeader().hide()
         self.horizontalHeader().setStretchLastSection(True)
 
-    def add_row(self, values: Sequence[str]) -> None:
-        """Append a row of display values."""
+    def add_row(self, values: Sequence[str]) -> int:
+        """Append a row of display values and return its table index."""
         row = self.rowCount()
         self.insertRow(row)
         for column, value in enumerate(values):
             item = QTableWidgetItem(value)
             item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
             self.setItem(row, column, item)
+        return row

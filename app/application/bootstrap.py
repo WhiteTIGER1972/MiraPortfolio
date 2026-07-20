@@ -3,7 +3,7 @@
 from loguru import logger
 from PySide6.QtWidgets import QApplication
 
-from app.core.container import Container
+from app.core.container import build_container
 from app.core.logging import configure_logging
 from app.core.settings import get_settings
 from app.infrastructure.database import DatabaseManager
@@ -28,12 +28,18 @@ def create_application() -> QApplication:
         database_manager.shutdown()
         raise RuntimeError("Mira Portfolio database health check failed.")
 
-    container = Container(
+    container = build_container(
         settings=settings,
         database_manager=database_manager,
-        session_factory=database_manager.session_factory,
     )
-    application = QApplication.instance() or QApplication([])
+    existing_application = QApplication.instance()
+    if existing_application is None:
+        application = QApplication([])
+    elif isinstance(existing_application, QApplication):
+        application = existing_application
+    else:
+        raise RuntimeError("A non-GUI Qt application instance already exists.")
+
     application.setApplicationName(settings.app_name)
     application.setOrganizationName(settings.company_name)
     application.aboutToQuit.connect(database_manager.shutdown)

@@ -5,6 +5,28 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
+from app.domain.entities.asset import AssetType
+from app.domain.value_objects.currency import Currency
+
+
+@dataclass(frozen=True, slots=True)
+class CreateAssetCommand:
+    """Request creation of an asset."""
+
+    symbol: str
+    name: str
+    asset_type: AssetType
+    currency: Currency
+
+
+@dataclass(frozen=True, slots=True)
+class RecordMarketPriceCommand:
+    """Request recording a market price for an existing Asset."""
+
+    asset_id: UUID
+    price: Decimal
+    observed_at: datetime
+
 
 @dataclass(frozen=True, slots=True)
 class CreatePortfolioCommand:
@@ -22,6 +44,8 @@ class BuyAssetCommand:
     quantity: Decimal
     unit_price: Decimal
     trade_datetime: datetime
+    commission: Decimal = Decimal("0")
+    tax: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +57,8 @@ class SellAssetCommand:
     quantity: Decimal
     unit_price: Decimal
     trade_datetime: datetime
+    commission: Decimal = Decimal("0")
+    tax: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +71,9 @@ class DeleteTransactionCommand:
 
 __all__ = [
     "BuyAssetCommand",
+    "CreateAssetCommand",
     "CreatePortfolioCommand",
     "DeleteTransactionCommand",
+    "RecordMarketPriceCommand",
     "SellAssetCommand",
 ]

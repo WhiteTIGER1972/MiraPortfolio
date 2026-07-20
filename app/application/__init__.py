@@ -2,8 +2,10 @@
 
 from app.application.commands import (
     BuyAssetCommand,
+    CreateAssetCommand,
     CreatePortfolioCommand,
     DeleteTransactionCommand,
+    RecordMarketPriceCommand,
     SellAssetCommand,
 )
 from app.application.events import (
@@ -27,46 +29,79 @@ from app.application.ports import (
     PriceHistoryRepository,
     SnapshotRepository,
 )
-from app.application.queries import GetPortfolioQuery, ListPortfoliosQuery
+from app.application.queries import (
+    GetLatestMarketPriceQuery,
+    GetPortfolioDashboardQuery,
+    GetPortfolioQuery,
+    ListAssetsQuery,
+    ListPortfoliosQuery,
+)
 from app.application.results import (
     AssetPositionView,
+    AssetView,
+    CurrencyValuationView,
+    MarketPriceView,
+    PortfolioDashboard,
     PortfolioDetails,
     PortfolioSummary,
     TransactionView,
+    ValuedAssetPositionView,
 )
 from app.application.services import (
+    AssetApplicationService,
+    DefaultAssetApplicationService,
+    DefaultMarketPriceApplicationService,
     DefaultPortfolioApplicationService,
+    DefaultPortfolioDashboardQueryService,
+    MarketPriceApplicationService,
     PortfolioApplicationService,
+    PortfolioDashboardQueryService,
 )
 from app.application.unit_of_work import UnitOfWork
 
 __all__ = [
     "ApplicationError",
     "ApplicationEventRegistrations",
+    "AssetApplicationService",
     "AssetNotFoundError",
     "AssetPositionView",
     "AssetRepository",
+    "AssetView",
     "BuyAssetCommand",
+    "CreateAssetCommand",
     "CreatePortfolioCommand",
+    "CurrencyValuationView",
+    "DefaultAssetApplicationService",
+    "DefaultMarketPriceApplicationService",
     "DefaultPortfolioApplicationService",
+    "DefaultPortfolioDashboardQueryService",
     "DeleteTransactionCommand",
     "EventDispatcher",
     "EventHandler",
     "EventPublisher",
+    "GetLatestMarketPriceQuery",
+    "GetPortfolioDashboardQuery",
     "GetPortfolioQuery",
     "InProcessEventBus",
+    "ListAssetsQuery",
     "ListPortfoliosQuery",
+    "MarketPriceApplicationService",
+    "MarketPriceView",
     "PortfolioApplicationService",
+    "PortfolioDashboard",
+    "PortfolioDashboardQueryService",
     "PortfolioDetails",
     "PortfolioNotFoundError",
     "PortfolioRepository",
     "PortfolioSummary",
     "PriceHistoryRepository",
+    "RecordMarketPriceCommand",
     "SellAssetCommand",
     "SnapshotRepository",
     "TransactionView",
     "TransactionAddedHandler",
     "UnitOfWork",
     "ValidationError",
+    "ValuedAssetPositionView",
     "register_application_event_handlers",
 ]

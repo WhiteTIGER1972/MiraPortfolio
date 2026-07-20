@@ -11,6 +11,62 @@ from app.domain.value_objects.currency import Currency
 
 
 @dataclass(frozen=True, slots=True)
+class AssetView:
+    """Present descriptive Asset data without calculated values."""
+
+    id: UUID
+    symbol: str
+    name: str
+    asset_type: AssetType
+    currency: Currency
+    is_active: bool
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class MarketPriceView:
+    """Present one persisted market price without source or freshness policy."""
+
+    id: UUID
+    asset_id: UUID
+    price: Decimal
+    currency: Currency
+    observed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ValuedAssetPositionView:
+    """Combine descriptive Asset data with calculated position valuation."""
+
+    asset_id: UUID
+    symbol: str
+    name: str
+    asset_type: AssetType
+    currency: Currency
+    quantity: Decimal
+    average_cost: Decimal
+    cost_basis: Decimal
+    market_price: Decimal | None
+    price_observed_at: datetime | None
+    market_value: Decimal
+    realized_pnl: Decimal
+    unrealized_pnl: Decimal
+    total_pnl: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class CurrencyValuationView:
+    """Present one exact per-currency valuation bucket."""
+
+    currency: Currency
+    cost_basis: Decimal
+    market_value: Decimal
+    realized_pnl: Decimal
+    unrealized_pnl: Decimal
+    total_pnl: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class PortfolioSummary:
     """Present the existing summary fields of a portfolio."""
 
@@ -61,9 +117,23 @@ class PortfolioDetails:
     created_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class PortfolioDashboard:
+    """Present Portfolio details with immutable position and currency valuations."""
+
+    portfolio: PortfolioDetails
+    positions: tuple[ValuedAssetPositionView, ...]
+    currencies: tuple[CurrencyValuationView, ...]
+
+
 __all__ = [
     "AssetPositionView",
+    "AssetView",
+    "CurrencyValuationView",
+    "MarketPriceView",
+    "PortfolioDashboard",
     "PortfolioDetails",
     "PortfolioSummary",
     "TransactionView",
+    "ValuedAssetPositionView",
 ]

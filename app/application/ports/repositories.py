@@ -83,6 +83,10 @@ class PriceHistoryRepository(Protocol):
         """Return a historical price by identity, or None when absent."""
 
     @abstractmethod
+    def get_latest_for_asset(self, asset_id: UUID) -> PriceHistory | None:
+        """Return the latest price for an Asset, or None when absent."""
+
+    @abstractmethod
     def list(
         self,
         *,
