@@ -765,43 +765,61 @@ def test_real_persistence_keeps_multiple_currencies_and_duplicate_symbols_isolat
         assert first.symbol == second.symbol == "DUP"
         assert first.id != second.id
 
+        first_quantity = Decimal("2.500000000000000001")
+        first_unit_price = Decimal("10.100000000000000001")
+        second_quantity = Decimal("3.750000000000000001")
+        second_unit_price = Decimal("20.200000000000000001")
         first_transaction_id = buy_asset(
             container,
             portfolio_id=portfolio.id,
             asset_id=first.id,
-            quantity=Decimal("2.500000000000000001"),
-            unit_price=Decimal("10.100000000000000001"),
+            quantity=first_quantity,
+            unit_price=first_unit_price,
             occurred_at=BUY_AT,
         )
         second_transaction_id = buy_asset(
             container,
             portfolio_id=portfolio.id,
             asset_id=second.id,
-            quantity=Decimal("3.750000000000000001"),
-            unit_price=Decimal("20.200000000000000001"),
+            quantity=second_quantity,
+            unit_price=second_unit_price,
             occurred_at=SELL_AT,
         )
+        first_price = Decimal("15.300000000000000001")
+        second_price = Decimal("31.700000000000000001")
         first_price_id = record_price(
             container,
             asset_id=first.id,
-            price=Decimal("15.300000000000000001"),
+            price=first_price,
             observed_at=PRICE_AT,
         )
         second_price_id = record_price(
             container,
             asset_id=second.id,
-            price=Decimal("31.700000000000000001"),
+            price=second_price,
             observed_at=REOPEN_PRICE_AT,
         )
+
+        persisted_assets = container.asset_application_service.list_assets(ListAssetsQuery())
+        assets_by_id = {asset.id: asset for asset in persisted_assets}
+        assert set(assets_by_id) == {first.id, second.id}
+        assert assets_by_id[first.id] == first
+        assert assets_by_id[second.id] == second
 
         details = container.portfolio_application_service.get_portfolio(
             GetPortfolioQuery(portfolio_id=portfolio.id)
         )
-        assert [item.asset_id for item in details.transactions] == [first.id, second.id]
-        assert [item.id for item in details.transactions] == [
-            first_transaction_id,
-            second_transaction_id,
-        ]
+        transactions_by_asset_id = {
+            transaction.asset_id: transaction for transaction in details.transactions
+        }
+        assert set(transactions_by_asset_id) == {first.id, second.id}
+        assert transactions_by_asset_id[first.id].id == first_transaction_id
+        assert transactions_by_asset_id[first.id].quantity == first_quantity
+        assert transactions_by_asset_id[first.id].price == first_unit_price
+        assert transactions_by_asset_id[second.id].id == second_transaction_id
+        assert transactions_by_asset_id[second.id].quantity == second_quantity
+        assert transactions_by_asset_id[second.id].price == second_unit_price
+
         first_latest = container.market_price_application_service.get_latest_market_price(
             GetLatestMarketPriceQuery(asset_id=first.id)
         )
@@ -810,37 +828,81 @@ def test_real_persistence_keeps_multiple_currencies_and_duplicate_symbols_isolat
         )
         assert first_latest is not None
         assert second_latest is not None
-        assert first_latest.id == first_price_id
-        assert second_latest.id == second_price_id
-        assert first_latest.asset_id == first.id
-        assert second_latest.asset_id == second.id
-        assert first_latest.price != second_latest.price
+        latest_prices_by_asset_id = {
+            first.id: first_latest,
+            second.id: second_latest,
+        }
+        assert latest_prices_by_asset_id[first.id].id == first_price_id
+        assert latest_prices_by_asset_id[first.id].asset_id == first.id
+        assert latest_prices_by_asset_id[first.id].price == first_price
+        assert latest_prices_by_asset_id[second.id].id == second_price_id
+        assert latest_prices_by_asset_id[second.id].asset_id == second.id
+        assert latest_prices_by_asset_id[second.id].price == second_price
 
         dashboard = container.portfolio_dashboard_query_service.get_dashboard(
             GetPortfolioDashboardQuery(portfolio_id=portfolio.id)
         )
-        assert [item.asset_id for item in dashboard.positions] == [first.id, second.id]
-        assert [item.currency for item in dashboard.positions] == [Currency.TRY, Currency.USD]
-        assert [item.currency for item in dashboard.currencies] == [
-            Currency.TRY,
-            Currency.USD,
-        ]
+        positions_by_asset_id = {position.asset_id: position for position in dashboard.positions}
+        assert set(positions_by_asset_id) == {first.id, second.id}
+        first_position = positions_by_asset_id[first.id]
+        second_position = positions_by_asset_id[second.id]
+        assert first_position.currency is Currency.TRY
+        assert first_position.quantity == first_quantity
+        assert first_position.market_price == first_price
+        assert second_position.currency is Currency.USD
+        assert second_position.quantity == second_quantity
+        assert second_position.market_price == second_price
+
+        valuations_by_currency = {
+            valuation.currency: valuation for valuation in dashboard.currencies
+        }
+        assert set(valuations_by_currency) == {Currency.TRY, Currency.USD}
+        assert valuations_by_currency[Currency.TRY].market_value == first_position.market_value
+        assert valuations_by_currency[Currency.TRY].cost_basis == first_position.cost_basis
+        assert valuations_by_currency[Currency.USD].market_value == second_position.market_value
+        assert valuations_by_currency[Currency.USD].cost_basis == second_position.cost_basis
+
         window = MainWindow(container)
         asset_table = child(window, QTableWidget, "assetRegistryTable")
         position_table = child(window, QTableWidget, "positionTable")
         currency_table = child(window, QTableWidget, "currencyValuationTable")
         assert asset_table.rowCount() == 2
-        assert [cell(asset_table, row, 0).text() for row in range(2)] == ["DUP", "DUP"]
-        assert [cell(asset_table, row, 0).data(Qt.ItemDataRole.UserRole) for row in range(2)] == [
-            str(first.id),
-            str(second.id),
-        ]
+        asset_rows_by_id: dict[UUID, int] = {}
+        for row in range(asset_table.rowCount()):
+            raw_asset_id = cell(asset_table, row, 0).data(Qt.ItemDataRole.UserRole)
+            assert isinstance(raw_asset_id, str)
+            asset_id = UUID(raw_asset_id)
+            assert asset_id not in asset_rows_by_id
+            asset_rows_by_id[asset_id] = row
+        assert set(asset_rows_by_id) == {first.id, second.id}
+        for asset in (first, second):
+            row = asset_rows_by_id[asset.id]
+            assert cell(asset_table, row, 0).text() == asset.symbol
+            assert cell(asset_table, row, 1).text() == asset.name
+            assert cell(asset_table, row, 3).text() == asset.currency.value
+
         assert position_table.rowCount() == 2
-        for row, position in enumerate(dashboard.positions):
-            assert_position_row(position_table, row, position)
+        position_rows_by_id: dict[UUID, int] = {}
+        for row in range(position_table.rowCount()):
+            raw_asset_id = cell(position_table, row, 0).data(Qt.ItemDataRole.UserRole)
+            assert isinstance(raw_asset_id, str)
+            asset_id = UUID(raw_asset_id)
+            assert asset_id not in position_rows_by_id
+            position_rows_by_id[asset_id] = row
+        assert set(position_rows_by_id) == {first.id, second.id}
+        for asset_id, position in positions_by_asset_id.items():
+            assert_position_row(position_table, position_rows_by_id[asset_id], position)
+
         assert currency_table.rowCount() == 2
-        for row, valuation in enumerate(dashboard.currencies):
-            assert_currency_row(currency_table, row, valuation)
+        currency_rows: dict[Currency, int] = {}
+        for row in range(currency_table.rowCount()):
+            currency = Currency(cell(currency_table, row, 0).text())
+            assert currency not in currency_rows
+            currency_rows[currency] = row
+        assert set(currency_rows) == {Currency.TRY, Currency.USD}
+        for currency, valuation in valuations_by_currency.items():
+            assert_currency_row(currency_table, currency_rows[currency], valuation)
+
         assert child(window, QLabel, "noFxNotice").text() == (
             "Values are shown separately by currency. No FX conversion is applied."
         )
