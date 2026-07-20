@@ -22,8 +22,8 @@ from PySide6.QtWidgets import (
 
 from app.application.commands import CreateAssetCommand, CreatePortfolioCommand
 from app.application.exceptions import ValidationError
-from app.application.queries import ListAssetsQuery, ListPortfoliosQuery
-from app.application.results import AssetView, PortfolioDetails, PortfolioSummary
+from app.application.queries import GetPortfolioQuery, ListAssetsQuery, ListPortfoliosQuery
+from app.application.results import AssetView, MarketPriceView, PortfolioDetails, PortfolioSummary
 from app.core.container import Container
 from app.domain.entities.asset import AssetType
 from app.domain.value_objects.currency import Currency
@@ -89,9 +89,14 @@ class FakePortfolioService:
 
     def __init__(self, portfolios: tuple[PortfolioSummary, ...] = ()) -> None:
         self.portfolios = portfolios
+        self.details_by_id = {
+            portfolio.id: portfolio_details(portfolio) for portfolio in portfolios
+        }
         self.list_calls: list[ListPortfoliosQuery] = []
+        self.get_calls: list[GetPortfolioQuery] = []
         self.create_calls: list[CreatePortfolioCommand] = []
         self.list_error: Exception | None = None
+        self.get_error: Exception | None = None
         self.create_error: Exception | None = None
         self.create_result: PortfolioDetails | None = None
 
@@ -121,7 +126,14 @@ class FakePortfolioService:
                 created_at=created.created_at,
             ),
         )
+        self.details_by_id[created.id] = created
         return created
+
+    def get_portfolio(self, query: GetPortfolioQuery) -> PortfolioDetails:
+        self.get_calls.append(query)
+        if self.get_error is not None:
+            raise self.get_error
+        return self.details_by_id[query.portfolio_id]
 
 
 class FakeAssetService:
@@ -151,6 +163,15 @@ class FakeAssetService:
         return self.create_result
 
 
+class FakeMarketPriceService:
+    """Fail if Commit 7 management tests unexpectedly record or read prices."""
+
+    def __init__(self) -> None:
+        self.record_calls: list[object] = []
+        self.latest_calls: list[object] = []
+        self.record_result: MarketPriceView | None = None
+
+
 class WindowFactory:
     """Construct and clean up MainWindows around lightweight services."""
 
@@ -162,13 +183,16 @@ class WindowFactory:
         self,
         portfolios: FakePortfolioService,
         assets: FakeAssetService,
+        market_prices: FakeMarketPriceService | None = None,
     ) -> MainWindow:
+        price_service = market_prices or FakeMarketPriceService()
         container = cast(
             Container,
             SimpleNamespace(
                 settings=SimpleNamespace(app_name="Mira UI Test"),
                 portfolio_application_service=portfolios,
                 asset_application_service=assets,
+                market_price_application_service=price_service,
             ),
         )
         window = MainWindow(container)
@@ -233,6 +257,7 @@ def test_initial_load_populates_ordered_uuid_backed_management_state(
     details = window.findChild(QLabel, "selectedPortfolioDetails")
 
     assert len(portfolio_service.list_calls) == 1
+    assert portfolio_service.get_calls == [GetPortfolioQuery(portfolio_id=first_id)]
     assert len(asset_service.list_calls) == 1
     assert portfolio_service.create_calls == []
     assert asset_service.create_calls == []
@@ -252,6 +277,10 @@ def test_initial_load_populates_ordered_uuid_backed_management_state(
     assert "Active" in details.text()
 
     selector.setCurrentIndex(1)
+    assert portfolio_service.get_calls == [
+        GetPortfolioQuery(portfolio_id=first_id),
+        GetPortfolioQuery(portfolio_id=second_id),
+    ]
     assert window._selected_portfolio_id == second_id
     assert "USD" in details.text()
     assert "Archived" in details.text()
@@ -295,6 +324,7 @@ def test_empty_state_disables_selector_without_placeholder_rows(
     assert not selector.isEnabled()
     assert selector.count() == 0
     assert window._selected_portfolio_id is None
+    assert window._selected_portfolio_details is None
     assert table is not None
     assert table.rowCount() == 0
     assert portfolio_empty is not None
@@ -304,7 +334,7 @@ def test_empty_state_disables_selector_without_placeholder_rows(
     assert asset_empty.text() == "No assets have been created yet."
     assert asset_empty.isVisibleTo(window)
     assert window.findChild(QLabel, "futureWorkflowState").text() == (
-        "Transactions and valuation will be added in the next Alpha step."
+        "Calculated valuation will be added in the next Alpha step."
     )
     assert window.findChild(QLabel, "selectedPortfolioName").text() == ("No portfolio selected")
     assert window.findChild(type(window._new_portfolio_button), "newPortfolioButton").isEnabled()
@@ -343,6 +373,10 @@ def test_portfolio_creation_refreshes_once_and_selects_returned_uuid(
         CreatePortfolioCommand(portfolio_name="  New portfolio  ")
     ]
     assert len(portfolio_service.list_calls) == 2
+    assert portfolio_service.get_calls == [
+        GetPortfolioQuery(portfolio_id=existing.id),
+        GetPortfolioQuery(portfolio_id=created_summary.id),
+    ]
     assert len(asset_service.list_calls) == 1
     assert asset_service.create_calls == []
     assert window._selected_portfolio_id == created_summary.id
@@ -380,6 +414,10 @@ def test_portfolio_cancel_and_failure_preserve_selection_without_refresh(
     assert portfolio_service.create_calls == []
     assert len(portfolio_service.list_calls) == 1
     assert window._selected_portfolio_id == second.id
+    assert portfolio_service.get_calls == [
+        GetPortfolioQuery(portfolio_id=first.id),
+        GetPortfolioQuery(portfolio_id=second.id),
+    ]
 
     errors = capture_errors(monkeypatch)
     portfolio_service.create_error = ValidationError("Name is required.")
@@ -554,6 +592,10 @@ def test_refresh_preserves_uuid_selection_and_uses_truthful_fallbacks(
 
     assert window._refresh_portfolios()
     assert window._refresh_assets()
+    assert portfolio_service.get_calls == [
+        GetPortfolioQuery(portfolio_id=first.id),
+        GetPortfolioQuery(portfolio_id=second.id),
+    ]
     assert window._selected_portfolio_id == second.id
     assert selector.currentData() == str(second.id)
     assert window._selected_asset_id == second_asset.id
@@ -563,6 +605,7 @@ def test_refresh_preserves_uuid_selection_and_uses_truthful_fallbacks(
     asset_service.assets = (first_asset,)
     assert window._refresh_portfolios()
     assert window._refresh_assets()
+    assert portfolio_service.get_calls[-1] == GetPortfolioQuery(portfolio_id=first.id)
     assert window._selected_portfolio_id == first.id
     assert selector.currentData() == str(first.id)
     assert window._selected_asset_id is None
@@ -629,7 +672,7 @@ def test_main_window_smoke_and_visible_text_are_truthful(
     assert window.minimumHeight() >= 700
     assert "Portfolio setup" in visible_text
     assert "Asset registry" in visible_text
-    assert "Transactions and valuation will be added" in visible_text
+    assert "Calculated valuation will be added" in visible_text
     for fabricated in (
         "THYAO",
         "TUPRS",
@@ -664,15 +707,10 @@ def test_ui_source_respects_management_service_boundary() -> None:
         "container.session_factory",
         "container.unit_of_work_factory",
         "container.database_manager",
-        "container.market_price_application_service",
         "container.portfolio_dashboard_query_service",
     ):
         assert forbidden_container_access not in source
     for forbidden_workflow in (
-        "BuyAssetCommand",
-        "SellAssetCommand",
-        "RecordMarketPriceCommand",
-        "DeleteTransactionCommand",
         "GetPortfolioDashboardQuery",
         "GetLatestMarketPriceQuery",
     ):
