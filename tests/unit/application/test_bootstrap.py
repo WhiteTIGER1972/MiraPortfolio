@@ -106,14 +106,17 @@ class BootstrapHarness:
         build_error: Exception | None = None,
     ) -> None:
         root = tmp_path / "bootstrap"
+        data_root = root / "data"
         self.settings = Settings(
             app_name="Mira Test",
             company_name="Mira Company",
             database_url=f"sqlite:///{(root / 'unused.db').as_posix()}",
+            data_directory=data_root,
             cache_directory=root / "cache",
-            database_directory=root / "data",
-            export_directory=root / "exports",
-            backup_directory=root / "backups",
+            database_directory=data_root / "database",
+            export_directory=data_root / "exports",
+            backup_directory=data_root / "backups",
+            log_directory=root / "logs",
         )
         self.events: list[str] = []
         self.manager = FakeDatabaseManager(
@@ -202,10 +205,12 @@ def test_bootstrap_preserves_directory_creation(
     bootstrap.create_application()
 
     for directory in (
+        harness.settings.data_directory,
         harness.settings.cache_directory,
         harness.settings.database_directory,
         harness.settings.export_directory,
         harness.settings.backup_directory,
+        harness.settings.log_directory,
     ):
         assert directory.is_dir()
 

@@ -15,10 +15,12 @@ def create_application() -> QApplication:
     """Construct dependencies, initialize storage, and show the main window."""
     settings = get_settings()
     for directory in (
+        settings.data_directory,
         settings.cache_directory,
         settings.database_directory,
         settings.export_directory,
         settings.backup_directory,
+        settings.log_directory,
     ):
         directory.mkdir(parents=True, exist_ok=True)
 

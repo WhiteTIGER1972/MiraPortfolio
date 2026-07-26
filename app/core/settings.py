@@ -3,11 +3,37 @@
 from functools import lru_cache
 from pathlib import Path
 
-from platformdirs import user_cache_dir, user_data_dir
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.core import config
+from app.core import config, runtime_paths
+
+
+def _path_setting(values: dict[str, object], field_name: str) -> Path:
+    value = values[field_name]
+    if not isinstance(value, Path):
+        raise TypeError(f"{field_name} must be a Path.")
+    return value
+
+
+def _default_database_directory(values: dict[str, object]) -> Path:
+    return _path_setting(values, "data_directory") / config.DATABASE_DIRECTORY_NAME
+
+
+def _default_export_directory(values: dict[str, object]) -> Path:
+    return _path_setting(values, "data_directory") / config.EXPORT_DIRECTORY_NAME
+
+
+def _default_backup_directory(values: dict[str, object]) -> Path:
+    return _path_setting(values, "data_directory") / config.BACKUP_DIRECTORY_NAME
+
+
+def _default_database_path(values: dict[str, object]) -> Path:
+    return _path_setting(values, "database_directory") / config.DATABASE_FILENAME
+
+
+def _default_database_url(values: dict[str, object]) -> str:
+    return runtime_paths.sqlite_url_for_path(_path_setting(values, "database_path"))
 
 
 class Settings(BaseSettings):
@@ -32,30 +58,16 @@ class Settings(BaseSettings):
         gt=0,
         description="Market refresh interval in seconds.",
     )
-    cache_directory: Path = Field(
-        default_factory=lambda: (
-            Path(user_cache_dir(config.APP_NAME, config.COMPANY_NAME)) / config.CACHE_DIRECTORY_NAME
-        )
-    )
-    database_directory: Path = Field(
-        default_factory=lambda: (
-            Path(user_data_dir(config.APP_NAME, config.COMPANY_NAME))
-            / config.DATABASE_DIRECTORY_NAME
-        )
-    )
-    export_directory: Path = Field(
-        default_factory=lambda: (
-            Path(user_data_dir(config.APP_NAME, config.COMPANY_NAME)) / config.EXPORT_DIRECTORY_NAME
-        )
-    )
-    backup_directory: Path = Field(
-        default_factory=lambda: (
-            Path(user_data_dir(config.APP_NAME, config.COMPANY_NAME)) / config.BACKUP_DIRECTORY_NAME
-        )
-    )
+    data_directory: Path = Field(default_factory=lambda: runtime_paths.default_data_directory())
+    cache_directory: Path = Field(default_factory=lambda: runtime_paths.default_cache_directory())
+    database_directory: Path = Field(default_factory=_default_database_directory)
+    export_directory: Path = Field(default_factory=_default_export_directory)
+    backup_directory: Path = Field(default_factory=_default_backup_directory)
+    log_directory: Path = Field(default_factory=lambda: runtime_paths.default_log_directory())
+    database_path: Path = Field(default_factory=_default_database_path)
+    database_url: str = Field(default_factory=_default_database_url)
     environment: str = config.ENVIRONMENT
     debug: bool = config.DEBUG
-    database_url: str = config.DATABASE_URL
     log_level: str = config.LOG_LEVEL
 
 
