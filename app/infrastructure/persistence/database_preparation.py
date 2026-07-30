@@ -32,7 +32,7 @@ from app.infrastructure.persistence.alembic_support import (
     verify_revision,
 )
 from app.infrastructure.persistence.sqlite_validation import (
-    open_read_only_sqlite,
+    open_sqlite_backup_source,
     sqlite_file_path,
     verify_sqlite_integrity,
 )
@@ -141,6 +141,22 @@ def _prepare_non_sqlite(
             engine.dispose()
 
 
+def prepare_isolated_sqlite_database(
+    database: Path,
+    *,
+    script_location: Path | None = None,
+) -> DatabasePreparationResult:
+    """Upgrade or exact-schema-stamp a caller-owned isolated SQLite database."""
+    if database.is_symlink() or not database.is_file():
+        raise DatabaseError("The isolated database is not a regular file.")
+    database_url = runtime_paths.sqlite_url_for_path(database.resolve())
+    config = create_alembic_config(database_url, script_location=script_location)
+    _, head = require_single_head(config)
+    outcome = _prepare_sqlite_staging(database_url, config, head)
+    _cleanup_sqlite_sidecars(database)
+    return DatabasePreparationResult(outcome)
+
+
 def _legacy_discovery_is_enabled(settings: Settings) -> bool:
     default_url = runtime_paths.sqlite_url_for_path(settings.database_path)
     return settings.database_url == default_url and "database_url" not in settings.model_fields_set
@@ -220,7 +236,7 @@ def _prepare_sqlite_file(
 
 def _backup_sqlite(source: Path, destination: Path) -> None:
     try:
-        with closing(open_read_only_sqlite(source)) as source_connection:
+        with closing(open_sqlite_backup_source(source)) as source_connection:
             with closing(sqlite3.connect(destination)) as destination_connection:
                 source_connection.backup(destination_connection)
                 destination_connection.commit()
@@ -340,4 +356,5 @@ __all__ = [
     "DatabasePreparationResult",
     "PreparationOutcome",
     "prepare_database",
+    "prepare_isolated_sqlite_database",
 ]

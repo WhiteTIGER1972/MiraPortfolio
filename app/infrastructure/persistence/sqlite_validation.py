@@ -74,6 +74,16 @@ def open_read_only_sqlite(path: Path) -> sqlite3.Connection:
     return connection
 
 
+def open_sqlite_backup_source(path: Path) -> sqlite3.Connection:
+    """Open a backup source without creating sidecars when none are present."""
+    absolute_path = Path(os.path.abspath(path))
+    sidecars_present = any(sidecar.exists() for sidecar in sqlite_sidecar_paths(absolute_path))
+    query = "mode=ro" if sidecars_present else "mode=ro&immutable=1"
+    connection = sqlite3.connect(f"{absolute_path.as_uri()}?{query}", uri=True)
+    connection.execute("PRAGMA query_only = ON")
+    return connection
+
+
 def verify_sqlite_integrity(path: Path, *, verify_foreign_keys: bool = False) -> None:
     """Verify SQLite integrity, optionally checking connection-level FK enforcement."""
     try:
@@ -119,6 +129,34 @@ def validate_current_sqlite_database(
         raise
     except (OSError, sqlite3.Error, SQLAlchemyError) as error:
         raise DatabaseError(f"SQLite database validation failed for '{path}'.") from error
+    finally:
+        if engine is not None:
+            engine.dispose()
+
+
+def inspect_sqlite_revision(
+    path: Path,
+    *,
+    script_location: Path | None = None,
+) -> tuple[str | None, str]:
+    """Return a known current revision and sole head without modifying the database."""
+    engine: Engine | None = None
+    try:
+        verify_sqlite_integrity(path)
+        database_url = runtime_paths.sqlite_url_for_path(path)
+        config = create_alembic_config(database_url, script_location=script_location)
+        script, head = require_single_head(config)
+        engine = create_engine(
+            "sqlite+pysqlite://",
+            creator=lambda: open_read_only_sqlite(path),
+            poolclass=NullPool,
+        )
+        with engine.connect() as connection:
+            return validated_current_revision(connection, script), head
+    except DatabaseError:
+        raise
+    except (OSError, sqlite3.Error, SQLAlchemyError) as error:
+        raise DatabaseError(f"SQLite revision inspection failed for '{path}'.") from error
     finally:
         if engine is not None:
             engine.dispose()
@@ -185,7 +223,9 @@ __all__ = [
     "SQLiteDatabaseFingerprint",
     "fingerprint_file",
     "fingerprint_sqlite_database",
+    "inspect_sqlite_revision",
     "open_read_only_sqlite",
+    "open_sqlite_backup_source",
     "sqlite_file_path",
     "sqlite_sidecar_paths",
     "validate_current_sqlite_database",

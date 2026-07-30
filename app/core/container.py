@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.application.backup import BackupService
+from app.application.restore import RestoreService
 from app.application.services import (
     AssetApplicationService,
     DefaultAssetApplicationService,
@@ -20,6 +21,7 @@ from app.application.unit_of_work import UnitOfWork
 from app.core.settings import Settings
 from app.infrastructure.database import DatabaseManager
 from app.infrastructure.persistence.database_backup import SQLiteBackupService
+from app.infrastructure.persistence.database_restore import SQLiteRestoreService
 from app.infrastructure.persistence.sqlalchemy.unit_of_work import (
     SQLAlchemyUnitOfWork,
 )
@@ -34,6 +36,7 @@ class Container:
     session_factory: sessionmaker[Session]
     unit_of_work_factory: Callable[[], UnitOfWork]
     backup_service: BackupService
+    restore_service: RestoreService
     portfolio_application_service: PortfolioApplicationService
     asset_application_service: AssetApplicationService
     market_price_application_service: MarketPriceApplicationService
@@ -56,6 +59,7 @@ def build_container(
         session_factory=session_factory,
         unit_of_work_factory=unit_of_work_factory,
         backup_service=SQLiteBackupService(settings),
+        restore_service=SQLiteRestoreService(settings),
         portfolio_application_service=DefaultPortfolioApplicationService(
             unit_of_work_factory,
         ),

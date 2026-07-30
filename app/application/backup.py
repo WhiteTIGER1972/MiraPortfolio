@@ -11,6 +11,7 @@ class BackupKind(StrEnum):
     """Identify why a backup was created."""
 
     MANUAL = "manual"
+    PRE_RESTORE = "pre_restore"
 
 
 @dataclass(frozen=True, slots=True)

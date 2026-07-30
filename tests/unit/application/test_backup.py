@@ -71,7 +71,7 @@ def test_backup_service_has_only_narrow_abstract_operations() -> None:
     assert list(inspect.signature(BackupService.list_backups).parameters) == ["self"]
     assert list(inspect.signature(BackupService.verify_backup).parameters) == ["self", "path"]
     assert get_type_hints(BackupService.verify_backup)["path"] is Path
-    assert tuple(BackupKind) == (BackupKind.MANUAL,)
+    assert tuple(BackupKind) == (BackupKind.MANUAL, BackupKind.PRE_RESTORE)
 
 
 def test_backup_contract_has_no_infrastructure_ui_or_domain_imports() -> None:

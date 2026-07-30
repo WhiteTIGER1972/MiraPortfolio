@@ -2,14 +2,16 @@
 
 import inspect
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar, Self, get_type_hints
 
 import pytest
 
 from app.application import bootstrap
+from app.application.restore import RestoreApplicationResult, RestoreOutcome
 from app.core.container import Container
-from app.core.exceptions import DatabaseError
+from app.core.exceptions import DatabaseError, RestoreApplicationError
 from app.core.settings import Settings
 from app.infrastructure.persistence.database_preparation import (
     DatabasePreparationResult,
@@ -110,6 +112,7 @@ class BootstrapHarness:
         healthy: bool = True,
         build_error: Exception | None = None,
         preparation_error: Exception | None = None,
+        restore_error: Exception | None = None,
     ) -> None:
         root = tmp_path / "bootstrap"
         data_root = root / "data"
@@ -133,6 +136,8 @@ class BootstrapHarness:
         self.container = object()
         self.build_error = build_error
         self.preparation_error = preparation_error
+        self.restore_error = restore_error
+        self.restore_calls: list[Settings] = []
         self.preparation_calls: list[Settings] = []
         self.database_factory_calls: list[Settings] = []
         self.build_calls: list[tuple[Settings, FakeDatabaseManager]] = []
@@ -143,6 +148,7 @@ class BootstrapHarness:
         FakeApplication.created_arguments = []
         monkeypatch.setattr(bootstrap, "get_settings", lambda: self.settings)
         monkeypatch.setattr(bootstrap, "configure_logging", self.configure_logging)
+        monkeypatch.setattr(bootstrap, "apply_pending_restore", self.apply_pending_restore)
         monkeypatch.setattr(bootstrap, "prepare_database", self.prepare_database)
         monkeypatch.setattr(bootstrap, "DatabaseManager", self.database_manager_factory)
         monkeypatch.setattr(bootstrap, "build_container", self.build_container)
@@ -153,6 +159,20 @@ class BootstrapHarness:
     def configure_logging(self, settings: Settings) -> None:
         assert settings is self.settings
         self.events.append("logging.configure")
+
+    def apply_pending_restore(self, settings: Settings) -> RestoreApplicationResult:
+        assert settings is self.settings
+        self.restore_calls.append(settings)
+        self.events.append("database.restore")
+        if self.restore_error is not None:
+            raise self.restore_error
+        return RestoreApplicationResult(
+            request_id=None,
+            outcome=RestoreOutcome.NO_PENDING_RESTORE,
+            restored_backup=None,
+            pre_restore_backup=None,
+            applied_at=datetime(2026, 7, 30, tzinfo=UTC),
+        )
 
     def prepare_database(self, settings: Settings) -> DatabasePreparationResult:
         assert settings is self.settings
@@ -209,6 +229,7 @@ def test_successful_bootstrap_delegates_composition_and_window_injection(
 
     assert isinstance(application, FakeApplication)
     assert harness.preparation_calls == [harness.settings]
+    assert harness.restore_calls == [harness.settings]
     assert harness.database_factory_calls == [harness.settings]
     assert harness.manager.initialize_count == 1
     assert harness.manager.health_check_count == 1
@@ -221,6 +242,8 @@ def test_successful_bootstrap_delegates_composition_and_window_injection(
     assert application.organization_name == harness.settings.company_name
     assert FakeApplication.created_arguments == [[]]
     assert harness.events.index("logging.configure") < harness.events.index("database.prepare")
+    assert harness.events.index("logging.configure") < harness.events.index("database.restore")
+    assert harness.events.index("database.restore") < harness.events.index("database.prepare")
     assert harness.events.index("database.prepare") < harness.events.index("database.construct")
     assert harness.events.index("database.construct") < harness.events.index("database.initialize")
     assert harness.events.index("database.health_check") < harness.events.index("container.build")
@@ -285,6 +308,30 @@ def test_database_preparation_failure_stops_before_manager_container_and_ui(
     assert harness.manager.health_check_count == 0
     assert harness.build_calls == []
     assert harness.theme_calls == []
+    assert harness.windows == []
+    assert FakeApplication.created_arguments == []
+
+
+def test_restore_failure_stops_before_preparation_manager_container_and_ui(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    failure = RestoreApplicationError("restore failed")
+    harness = BootstrapHarness(
+        monkeypatch,
+        tmp_path,
+        restore_error=failure,
+    )
+
+    with pytest.raises(RestoreApplicationError) as raised:
+        bootstrap.create_application()
+
+    assert raised.value is failure
+    assert harness.restore_calls == [harness.settings]
+    assert harness.preparation_calls == []
+    assert harness.database_factory_calls == []
+    assert harness.manager.initialize_count == 0
+    assert harness.build_calls == []
     assert harness.windows == []
     assert FakeApplication.created_arguments == []
 
@@ -358,6 +405,7 @@ def test_bootstrap_source_delegates_graph_construction_without_service_behavior(
 
     assert "from app.core.container import build_container" in source
     assert "build_container(" in source
+    assert "apply_pending_restore(settings)" in source
     assert "MainWindow(container)" in source
     assert "Container(" not in source
     for forbidden_text in (

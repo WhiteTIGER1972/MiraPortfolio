@@ -40,7 +40,7 @@ from app.infrastructure.persistence.sqlite_validation import (
     SQLiteDatabaseFingerprint,
     fingerprint_file,
     fingerprint_sqlite_database,
-    open_read_only_sqlite,
+    open_sqlite_backup_source,
     sqlite_file_path,
     sqlite_sidecar_paths,
     validate_current_sqlite_database,
@@ -102,8 +102,6 @@ class SQLiteBackupService(BackupService):
 
     def create_backup(self, kind: BackupKind = BackupKind.MANUAL) -> BackupRecord:
         """Create, independently verify, and atomically install one backup archive."""
-        if kind is not BackupKind.MANUAL:
-            raise BackupCreationError("Only manual backups are available in this release.")
         source = self._source_path()
         _require_regular_source(source)
         backup_directory = self._settings.backup_directory
@@ -200,7 +198,11 @@ class SQLiteBackupService(BackupService):
             verification=True,
         )
         try:
-            manifest = self._inspect_and_extract_archive(path, validation_database)
+            record = extract_verified_backup_payload(
+                self._settings,
+                path,
+                validation_database,
+            )
             try:
                 revision = validate_current_sqlite_database(
                     validation_database,
@@ -210,19 +212,8 @@ class SQLiteBackupService(BackupService):
                 raise BackupVerificationError(
                     "Backup database integrity, revision, or schema validation failed."
                 ) from error
-            if not hmac.compare_digest(revision, manifest.alembic_revision):
+            if not hmac.compare_digest(revision, record.alembic_revision):
                 raise BackupVerificationError("Backup revision does not match its manifest.")
-            record = BackupRecord(
-                path=path,
-                filename=path.name,
-                created_at=manifest.created_at,
-                app_version=manifest.application_version,
-                alembic_revision=manifest.alembic_revision,
-                database_size=manifest.database_size,
-                database_sha256=manifest.database_sha256,
-                backup_size=path.stat().st_size,
-                backup_kind=manifest.backup_kind,
-            )
             _remove_database_files(validation_database, verification=True)
             return record
         except BackupVerificationError:
@@ -289,40 +280,6 @@ class SQLiteBackupService(BackupService):
             if not candidate.exists():
                 return candidate
         raise BackupCreationError("A unique backup filename could not be generated.")
-
-    def _inspect_and_extract_archive(
-        self,
-        archive_path: Path,
-        validation_database: Path,
-    ) -> _BackupManifest:
-        if archive_path.stat().st_size > MAX_ARCHIVE_BYTES:
-            raise BackupVerificationError("Backup archive exceeds the supported size.")
-        try:
-            with zipfile.ZipFile(archive_path, mode="r") as archive:
-                infos = archive.infolist()
-                _validate_members(infos)
-                manifest_info = archive.getinfo(MANIFEST_MEMBER)
-                database_info = archive.getinfo(DATABASE_MEMBER)
-                manifest = _read_manifest(archive, manifest_info, self._settings)
-                if database_info.file_size != manifest.database_size:
-                    raise BackupVerificationError(
-                        "Backup database size does not match its manifest."
-                    )
-                if database_info.file_size > MAX_DATABASE_BYTES:
-                    raise BackupVerificationError("Backup database exceeds the supported size.")
-                extracted_size, extracted_sha256 = _extract_database(
-                    archive,
-                    database_info,
-                    validation_database,
-                )
-        except KeyError as error:
-            raise BackupVerificationError("Backup archive members are incomplete.") from error
-
-        if extracted_size != manifest.database_size:
-            raise BackupVerificationError("Backup database size does not match its manifest.")
-        if not hmac.compare_digest(extracted_sha256, manifest.database_sha256):
-            raise BackupVerificationError("Backup database checksum verification failed.")
-        return manifest
 
 
 def _utc_now() -> datetime:
@@ -403,7 +360,7 @@ def _source_is_unchanged(
     before: SQLiteDatabaseFingerprint,
     after: SQLiteDatabaseFingerprint,
 ) -> bool:
-    """Ignore only SHM reader-lock bytes that SQLite itself may update."""
+    """Ignore only SHM reader-lock bytes and mtime that SQLite itself updates."""
     return (
         before.database == after.database
         and before.wal == after.wal
@@ -411,12 +368,11 @@ def _source_is_unchanged(
         and before.shm.exists == after.shm.exists
         and before.shm.regular_file == after.shm.regular_file
         and before.shm.size == after.shm.size
-        and before.shm.modified_ns == after.shm.modified_ns
     )
 
 
 def _copy_database(source: Path, destination: Path) -> None:
-    with closing(open_read_only_sqlite(source)) as source_connection:
+    with closing(open_sqlite_backup_source(source)) as source_connection:
         with closing(sqlite3.connect(destination)) as destination_connection:
             source_connection.backup(destination_connection)
             destination_connection.commit()
@@ -499,6 +455,69 @@ def _require_backup_archive_path(path: Path) -> None:
         raise BackupVerificationError("Backup archive does not exist.")
     if path.is_symlink() or not path.is_file():
         raise BackupVerificationError("Backup archive is not a regular file.")
+
+
+def extract_verified_backup_payload(
+    settings: Settings,
+    archive_path: Path,
+    destination: Path,
+) -> BackupRecord:
+    """Strictly validate an archive envelope and stream its payload to an owned file."""
+    _require_backup_archive_path(archive_path)
+    try:
+        manifest = _inspect_and_extract_archive(
+            settings,
+            archive_path,
+            destination,
+        )
+        return BackupRecord(
+            path=archive_path,
+            filename=archive_path.name,
+            created_at=manifest.created_at,
+            app_version=manifest.application_version,
+            alembic_revision=manifest.alembic_revision,
+            database_size=manifest.database_size,
+            database_sha256=manifest.database_sha256,
+            backup_size=archive_path.stat().st_size,
+            backup_kind=manifest.backup_kind,
+        )
+    except BackupVerificationError:
+        raise
+    except (OSError, sqlite3.Error, zipfile.BadZipFile, UnicodeError) as error:
+        raise BackupVerificationError("Backup archive verification failed.") from error
+
+
+def _inspect_and_extract_archive(
+    settings: Settings,
+    archive_path: Path,
+    validation_database: Path,
+) -> _BackupManifest:
+    if archive_path.stat().st_size > MAX_ARCHIVE_BYTES:
+        raise BackupVerificationError("Backup archive exceeds the supported size.")
+    try:
+        with zipfile.ZipFile(archive_path, mode="r") as archive:
+            infos = archive.infolist()
+            _validate_members(infos)
+            manifest_info = archive.getinfo(MANIFEST_MEMBER)
+            database_info = archive.getinfo(DATABASE_MEMBER)
+            manifest = _read_manifest(archive, manifest_info, settings)
+            if database_info.file_size != manifest.database_size:
+                raise BackupVerificationError("Backup database size does not match its manifest.")
+            if database_info.file_size > MAX_DATABASE_BYTES:
+                raise BackupVerificationError("Backup database exceeds the supported size.")
+            extracted_size, extracted_sha256 = _extract_database(
+                archive,
+                database_info,
+                validation_database,
+            )
+    except KeyError as error:
+        raise BackupVerificationError("Backup archive members are incomplete.") from error
+
+    if extracted_size != manifest.database_size:
+        raise BackupVerificationError("Backup database size does not match its manifest.")
+    if not hmac.compare_digest(extracted_sha256, manifest.database_sha256):
+        raise BackupVerificationError("Backup database checksum verification failed.")
+    return manifest
 
 
 def _validate_members(infos: list[zipfile.ZipInfo]) -> None:
@@ -717,4 +736,5 @@ __all__ = [
     "MAX_DATABASE_BYTES",
     "MAX_MANIFEST_BYTES",
     "SQLiteBackupService",
+    "extract_verified_backup_payload",
 ]

@@ -26,6 +26,7 @@ from app.core.exceptions import (
     ConcurrentDatabaseChangeError,
 )
 from app.core.settings import Settings
+from app.infrastructure.database import DatabaseManager
 from app.infrastructure.persistence import database_backup
 from app.infrastructure.persistence.database_backup import (
     DATABASE_MEMBER,
@@ -281,12 +282,10 @@ def test_wal_committed_rows_are_included_uncommitted_rows_are_excluded_and_sourc
             after.shm.exists,
             after.shm.regular_file,
             after.shm.size,
-            after.shm.modified_ns,
         ) == (
             before.shm.exists,
             before.shm.regular_file,
             before.shm.size,
-            before.shm.modified_ns,
         )
         assert before.wal.exists
         assert before.shm.exists
@@ -367,7 +366,7 @@ def test_partial_temporary_reservation_failure_removes_owned_file(
     assert list(backup_settings.backup_directory.iterdir()) == []
 
 
-def test_shm_reader_bytes_are_ignored_but_wal_or_shm_metadata_changes_are_not() -> None:
+def test_shm_reader_activity_is_ignored_but_wal_or_shm_structure_changes_are_not() -> None:
     database = FileFingerprint(True, True, 100, 1, "a" * 64)
     wal = FileFingerprint(True, True, 20, 2, "b" * 64)
     shm = FileFingerprint(True, True, 32_768, 3, "c" * 64)
@@ -385,16 +384,16 @@ def test_shm_reader_bytes_are_ignored_but_wal_or_shm_metadata_changes_are_not() 
         shm,
         missing,
     )
-    changed_shm_metadata = SQLiteDatabaseFingerprint(
+    changed_shm_size = SQLiteDatabaseFingerprint(
         database,
         wal,
-        FileFingerprint(True, True, 32_768, 4, "c" * 64),
+        FileFingerprint(True, True, 65_536, 4, "c" * 64),
         missing,
     )
 
     assert database_backup._source_is_unchanged(before, reader_only)
     assert not database_backup._source_is_unchanged(before, changed_wal)
-    assert not database_backup._source_is_unchanged(before, changed_shm_metadata)
+    assert not database_backup._source_is_unchanged(before, changed_shm_size)
 
 
 def test_two_backups_in_same_second_are_unique_and_never_overwrite(
@@ -410,6 +409,23 @@ def test_two_backups_in_same_second_are_unique_and_never_overwrite(
     assert first.filename != second.filename
     assert first.path.read_bytes() == first_bytes
     assert len(list(backup_settings.backup_directory.glob("*.mirabackup"))) == 2
+
+
+def test_offline_wal_mode_backup_does_not_recreate_source_sidecars(
+    backup_settings: Settings,
+) -> None:
+    manager = DatabaseManager(backup_settings).initialize()
+    assert manager.health_check()
+    manager.shutdown()
+    source = sqlite_file_path(backup_settings.database_url)
+    before = fingerprint_sqlite_database(source)
+    assert not before.wal.exists
+    assert not before.shm.exists
+
+    record = SQLiteBackupService(backup_settings).create_backup(BackupKind.PRE_RESTORE)
+
+    assert record.backup_kind is BackupKind.PRE_RESTORE
+    assert fingerprint_sqlite_database(source) == before
 
 
 def test_existing_final_backup_is_never_overwritten(

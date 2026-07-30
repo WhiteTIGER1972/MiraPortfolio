@@ -23,6 +23,7 @@ from app.application.queries import (
     GetPortfolioDashboardQuery,
     ListAssetsQuery,
 )
+from app.application.restore import RestoreService
 from app.application.services import (
     AssetApplicationService,
     DefaultAssetApplicationService,
@@ -42,6 +43,7 @@ from app.domain.value_objects.currency import Currency
 from app.infrastructure.database import DatabaseManager
 from app.infrastructure.persistence.database_backup import SQLiteBackupService
 from app.infrastructure.persistence.database_preparation import prepare_database
+from app.infrastructure.persistence.database_restore import SQLiteRestoreService
 from app.infrastructure.persistence.sqlalchemy.unit_of_work import (
     SQLAlchemyUnitOfWork,
 )
@@ -83,6 +85,7 @@ def test_container_has_exact_immutable_typed_fields() -> None:
         "session_factory",
         "unit_of_work_factory",
         "backup_service",
+        "restore_service",
         "portfolio_application_service",
         "asset_application_service",
         "market_price_application_service",
@@ -91,6 +94,7 @@ def test_container_has_exact_immutable_typed_fields() -> None:
     annotations = get_type_hints(Container)
     assert annotations["unit_of_work_factory"] == Callable[[], UnitOfWork]
     assert annotations["backup_service"] is BackupService
+    assert annotations["restore_service"] is RestoreService
     assert annotations["portfolio_application_service"] is PortfolioApplicationService
     assert annotations["asset_application_service"] is AssetApplicationService
     assert annotations["market_price_application_service"] is MarketPriceApplicationService
@@ -133,6 +137,9 @@ def test_build_container_constructs_services_behind_abstract_contracts(
         assert isinstance(container.backup_service, BackupService)
         assert type(container.backup_service) is SQLiteBackupService
         assert getattr(container.backup_service, "_settings") is settings
+        assert isinstance(container.restore_service, RestoreService)
+        assert type(container.restore_service) is SQLiteRestoreService
+        assert getattr(container.restore_service, "_settings") is settings
         assert type(container.portfolio_application_service) is DefaultPortfolioApplicationService
         assert type(container.asset_application_service) is DefaultAssetApplicationService
         assert (
@@ -229,6 +236,7 @@ def test_container_is_frozen(
             ("settings", settings.model_copy()),
             ("unit_of_work_factory", lambda: None),
             ("backup_service", object()),
+            ("restore_service", object()),
             ("asset_application_service", object()),
         ):
             with pytest.raises(FrozenInstanceError):
@@ -251,6 +259,7 @@ def test_independent_containers_do_not_share_factories_services_or_data(
         assert first is not second
         assert first.unit_of_work_factory is not second.unit_of_work_factory
         assert first.backup_service is not second.backup_service
+        assert first.restore_service is not second.restore_service
         assert first.asset_application_service is not second.asset_application_service
         first.asset_application_service.create_asset(
             CreateAssetCommand(
@@ -321,6 +330,9 @@ def test_container_source_constructs_services_without_executing_workflows() -> N
         ".create_backup(",
         ".list_backups(",
         ".verify_backup(",
+        ".stage_restore(",
+        ".get_pending_restore(",
+        ".cancel_pending_restore(",
         ".commit(",
         ".rollback(",
         "Session(",
@@ -339,4 +351,6 @@ def test_container_construction_does_not_create_or_scan_backup_directory(
         container = build_container(settings, manager)
 
         assert isinstance(container.backup_service, BackupService)
+        assert isinstance(container.restore_service, RestoreService)
         assert not settings.backup_directory.exists()
+        assert not (settings.database_directory / "restore").exists()

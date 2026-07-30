@@ -8,6 +8,7 @@ from app.core.logging import configure_logging
 from app.core.settings import get_settings
 from app.infrastructure.database import DatabaseManager
 from app.infrastructure.persistence.database_preparation import prepare_database
+from app.infrastructure.persistence.database_restore import apply_pending_restore
 from app.ui.theme.manager import ThemeManager
 from app.ui.windows.main_window import MainWindow
 
@@ -26,6 +27,13 @@ def create_application() -> QApplication:
         directory.mkdir(parents=True, exist_ok=True)
 
     configure_logging(settings)
+    restore = apply_pending_restore(settings)
+    logger.info("Database restore startup outcome: {}", restore.outcome.value)
+    if restore.pre_restore_backup is not None:
+        logger.info(
+            "Pre-restore safety backup retained: {}",
+            restore.pre_restore_backup.filename,
+        )
     preparation = prepare_database(settings)
     logger.info("Database preparation completed: {}", preparation.outcome.value)
     database_manager = DatabaseManager(settings).initialize()
