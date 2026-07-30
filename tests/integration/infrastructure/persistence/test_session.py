@@ -14,6 +14,7 @@ from app.core.settings import Settings
 from app.domain.entities.asset import Asset, AssetType
 from app.domain.value_objects.currency import Currency
 from app.infrastructure.database import DatabaseManager, session_scope
+from app.infrastructure.persistence.database_preparation import prepare_database
 from app.infrastructure.persistence.sqlalchemy.mappers import asset_to_model
 from app.infrastructure.persistence.sqlalchemy.models import AssetModel
 
@@ -154,12 +155,12 @@ def test_database_manager_initializes_registered_schema(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "manager.db"
-    manager = DatabaseManager(
-        Settings(database_url=f"sqlite:///{database.as_posix()}")
-    ).initialize()
+    settings = Settings(database_url=f"sqlite:///{database.as_posix()}")
+    prepare_database(settings, legacy_search_directory=tmp_path)
+    manager = DatabaseManager(settings).initialize()
     try:
         assert manager.health_check()
-        assert set(inspect(manager.engine).get_table_names()) == {
+        assert set(inspect(manager.engine).get_table_names()) - {"alembic_version"} == {
             "assets",
             "portfolio_assets",
             "portfolios",

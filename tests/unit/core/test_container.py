@@ -39,6 +39,7 @@ from app.core.settings import Settings
 from app.domain.entities.asset import AssetType
 from app.domain.value_objects.currency import Currency
 from app.infrastructure.database import DatabaseManager
+from app.infrastructure.persistence.database_preparation import prepare_database
 from app.infrastructure.persistence.sqlalchemy.unit_of_work import (
     SQLAlchemyUnitOfWork,
 )
@@ -65,6 +66,7 @@ def initialized_manager(
 ) -> Iterator[tuple[Settings, DatabaseManager]]:
     """Yield an initialized manager backed only by an isolated temporary database."""
     settings = make_settings(tmp_path)
+    prepare_database(settings, legacy_search_directory=tmp_path)
     manager = DatabaseManager(settings).initialize()
     try:
         yield settings, manager
@@ -230,6 +232,8 @@ def test_independent_containers_do_not_share_factories_services_or_data(
 ) -> None:
     first_settings = make_settings(tmp_path, "first")
     second_settings = make_settings(tmp_path, "second")
+    prepare_database(first_settings, legacy_search_directory=tmp_path)
+    prepare_database(second_settings, legacy_search_directory=tmp_path)
     first_manager = DatabaseManager(first_settings).initialize()
     second_manager = DatabaseManager(second_settings).initialize()
     try:

@@ -53,6 +53,7 @@ from app.domain.entities.asset import AssetType
 from app.domain.entities.transaction import TransactionType
 from app.domain.value_objects.currency import Currency
 from app.infrastructure.database import DatabaseManager
+from app.infrastructure.persistence.database_preparation import prepare_database
 from app.infrastructure.persistence.sqlalchemy.unit_of_work import SQLAlchemyUnitOfWork
 from app.ui.windows import main_window as main_window_module
 from app.ui.windows.main_window import MainWindow
@@ -85,20 +86,19 @@ def make_settings(tmp_path: Path, name: str) -> tuple[Settings, Path]:
     root = tmp_path / name
     root.mkdir(parents=True, exist_ok=True)
     database = root / "portfolio.db"
-    return (
-        Settings(
-            app_name=f"Mira Vertical Slice {name}",
-            environment="test",
-            auto_backup=False,
-            auto_snapshot=False,
-            database_url=f"sqlite:///{database.as_posix()}",
-            cache_directory=root / "cache",
-            database_directory=root / "data",
-            export_directory=root / "exports",
-            backup_directory=root / "backups",
-        ),
-        database,
+    settings = Settings(
+        app_name=f"Mira Vertical Slice {name}",
+        environment="test",
+        auto_backup=False,
+        auto_snapshot=False,
+        database_url=f"sqlite:///{database.as_posix()}",
+        cache_directory=root / "cache",
+        database_directory=root / "data",
+        export_directory=root / "exports",
+        backup_directory=root / "backups",
     )
+    prepare_database(settings, legacy_search_directory=root)
+    return settings, database
 
 
 def assert_real_service_graph(container: Container) -> None:

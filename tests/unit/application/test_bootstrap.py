@@ -9,7 +9,12 @@ import pytest
 
 from app.application import bootstrap
 from app.core.container import Container
+from app.core.exceptions import DatabaseError
 from app.core.settings import Settings
+from app.infrastructure.persistence.database_preparation import (
+    DatabasePreparationResult,
+    PreparationOutcome,
+)
 from app.ui.theme.manager import ThemeManager
 from app.ui.windows.main_window import MainWindow
 
@@ -104,6 +109,7 @@ class BootstrapHarness:
         *,
         healthy: bool = True,
         build_error: Exception | None = None,
+        preparation_error: Exception | None = None,
     ) -> None:
         root = tmp_path / "bootstrap"
         data_root = root / "data"
@@ -126,6 +132,8 @@ class BootstrapHarness:
         )
         self.container = object()
         self.build_error = build_error
+        self.preparation_error = preparation_error
+        self.preparation_calls: list[Settings] = []
         self.database_factory_calls: list[Settings] = []
         self.build_calls: list[tuple[Settings, FakeDatabaseManager]] = []
         self.theme_calls: list[FakeApplication] = []
@@ -135,6 +143,7 @@ class BootstrapHarness:
         FakeApplication.created_arguments = []
         monkeypatch.setattr(bootstrap, "get_settings", lambda: self.settings)
         monkeypatch.setattr(bootstrap, "configure_logging", self.configure_logging)
+        monkeypatch.setattr(bootstrap, "prepare_database", self.prepare_database)
         monkeypatch.setattr(bootstrap, "DatabaseManager", self.database_manager_factory)
         monkeypatch.setattr(bootstrap, "build_container", self.build_container)
         monkeypatch.setattr(bootstrap, "QApplication", FakeApplication)
@@ -144,6 +153,25 @@ class BootstrapHarness:
     def configure_logging(self, settings: Settings) -> None:
         assert settings is self.settings
         self.events.append("logging.configure")
+
+    def prepare_database(self, settings: Settings) -> DatabasePreparationResult:
+        assert settings is self.settings
+        assert all(
+            directory.is_dir()
+            for directory in (
+                settings.data_directory,
+                settings.cache_directory,
+                settings.database_directory,
+                settings.export_directory,
+                settings.backup_directory,
+                settings.log_directory,
+            )
+        )
+        self.preparation_calls.append(settings)
+        self.events.append("database.prepare")
+        if self.preparation_error is not None:
+            raise self.preparation_error
+        return DatabasePreparationResult(PreparationOutcome.ALREADY_CURRENT)
 
     def database_manager_factory(self, settings: Settings) -> FakeDatabaseManager:
         self.database_factory_calls.append(settings)
@@ -180,6 +208,7 @@ def test_successful_bootstrap_delegates_composition_and_window_injection(
     application = bootstrap.create_application()
 
     assert isinstance(application, FakeApplication)
+    assert harness.preparation_calls == [harness.settings]
     assert harness.database_factory_calls == [harness.settings]
     assert harness.manager.initialize_count == 1
     assert harness.manager.health_check_count == 1
@@ -191,7 +220,9 @@ def test_successful_bootstrap_delegates_composition_and_window_injection(
     assert application.application_name == harness.settings.app_name
     assert application.organization_name == harness.settings.company_name
     assert FakeApplication.created_arguments == [[]]
-    assert harness.events.index("logging.configure") < harness.events.index("database.initialize")
+    assert harness.events.index("logging.configure") < harness.events.index("database.prepare")
+    assert harness.events.index("database.prepare") < harness.events.index("database.construct")
+    assert harness.events.index("database.construct") < harness.events.index("database.initialize")
     assert harness.events.index("database.health_check") < harness.events.index("container.build")
     assert harness.events.index("container.build") < harness.events.index("theme.apply")
 
@@ -227,6 +258,31 @@ def test_health_check_failure_stops_before_composition_or_ui(
     assert harness.manager.initialize_count == 1
     assert harness.manager.health_check_count == 1
     assert harness.manager.shutdown_count == 1
+    assert harness.build_calls == []
+    assert harness.theme_calls == []
+    assert harness.windows == []
+    assert FakeApplication.created_arguments == []
+
+
+def test_database_preparation_failure_stops_before_manager_container_and_ui(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    failure = DatabaseError("preparation failed")
+    harness = BootstrapHarness(
+        monkeypatch,
+        tmp_path,
+        preparation_error=failure,
+    )
+
+    with pytest.raises(DatabaseError) as raised:
+        bootstrap.create_application()
+
+    assert raised.value is failure
+    assert harness.preparation_calls == [harness.settings]
+    assert harness.database_factory_calls == []
+    assert harness.manager.initialize_count == 0
+    assert harness.manager.health_check_count == 0
     assert harness.build_calls == []
     assert harness.theme_calls == []
     assert harness.windows == []

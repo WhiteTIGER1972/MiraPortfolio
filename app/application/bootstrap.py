@@ -7,6 +7,7 @@ from app.core.container import build_container
 from app.core.logging import configure_logging
 from app.core.settings import get_settings
 from app.infrastructure.database import DatabaseManager
+from app.infrastructure.persistence.database_preparation import prepare_database
 from app.ui.theme.manager import ThemeManager
 from app.ui.windows.main_window import MainWindow
 
@@ -25,6 +26,8 @@ def create_application() -> QApplication:
         directory.mkdir(parents=True, exist_ok=True)
 
     configure_logging(settings)
+    preparation = prepare_database(settings)
+    logger.info("Database preparation completed: {}", preparation.outcome.value)
     database_manager = DatabaseManager(settings).initialize()
     if not database_manager.health_check():
         database_manager.shutdown()
