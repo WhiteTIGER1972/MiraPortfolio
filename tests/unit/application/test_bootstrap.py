@@ -7,11 +7,13 @@ from pathlib import Path
 from typing import ClassVar, Self, get_type_hints
 
 import pytest
+from loguru import logger
 
 from app.application import bootstrap
 from app.application.restore import RestoreApplicationResult, RestoreOutcome
 from app.core.container import Container
 from app.core.exceptions import DatabaseError, RestoreApplicationError
+from app.core.logging import configure_logging as configure_real_logging
 from app.core.settings import Settings
 from app.infrastructure.persistence.database_preparation import (
     DatabasePreparationResult,
@@ -158,6 +160,7 @@ class BootstrapHarness:
 
     def configure_logging(self, settings: Settings) -> None:
         assert settings is self.settings
+        assert settings.log_directory.is_dir()
         self.events.append("logging.configure")
 
     def apply_pending_restore(self, settings: Settings) -> RestoreApplicationResult:
@@ -267,6 +270,32 @@ def test_bootstrap_preserves_directory_creation(
         harness.settings.log_directory,
     ):
         assert directory.is_dir()
+
+
+def test_bootstrap_real_logging_contains_no_runtime_path_or_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = BootstrapHarness(monkeypatch, tmp_path)
+
+    def configure_and_record(settings: Settings) -> None:
+        harness.events.append("logging.configure")
+        configure_real_logging(settings)
+
+    monkeypatch.setattr(bootstrap, "configure_logging", configure_and_record)
+    try:
+        bootstrap.create_application()
+        content = (harness.settings.log_directory / "mira-portfolio.log").read_text(
+            encoding="utf-8"
+        )
+    finally:
+        logger.remove()
+
+    assert harness.settings.database_url not in content
+    assert str(harness.settings.data_directory) not in content
+    assert str(harness.settings.database_path) not in content
+    assert "Database restore startup outcome" in content
+    assert "Database preparation completed" in content
 
 
 def test_health_check_failure_stops_before_composition_or_ui(

@@ -65,6 +65,22 @@ class PendingRestoreCorruptError(RestoreVerificationError):
     """Raised when pending restore state is malformed or unsafe."""
 
 
+class DiagnosticsError(MiraPortfolioError):
+    """Raised when privacy-safe diagnostics cannot complete."""
+
+
+class DiagnosticsCollectionError(DiagnosticsError):
+    """Raised when required diagnostic metadata cannot be collected safely."""
+
+
+class SupportBundleCreationError(DiagnosticsError):
+    """Raised when a support bundle cannot be created atomically."""
+
+
+class SupportBundleVerificationError(DiagnosticsError):
+    """Raised when a support bundle is invalid or violates its privacy contract."""
+
+
 class RepositoryError(DatabaseError):
     """Raised when a repository cannot complete a persistence operation."""
 
