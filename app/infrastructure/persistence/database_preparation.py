@@ -31,6 +31,11 @@ from app.infrastructure.persistence.alembic_support import (
     validated_current_revision,
     verify_revision,
 )
+from app.infrastructure.persistence.sqlite_validation import (
+    open_read_only_sqlite,
+    sqlite_file_path,
+    verify_sqlite_integrity,
+)
 
 ALEMBIC_VERSION_TABLE: Final = "alembic_version"
 LEGACY_DATABASE_FILENAMES: Final = ("portfolio.db", "mira_portfolio.db")
@@ -83,9 +88,10 @@ def prepare_database(
         outcome = _prepare_non_sqlite(settings.database_url, script_location)
         return DatabasePreparationResult(outcome)
 
-    target = _sqlite_file_path(configured_url)
-    if target is None:
-        raise DatabaseError("The configured SQLite database must use a file path.")
+    try:
+        target = sqlite_file_path(settings.database_url)
+    except ValueError as error:
+        raise DatabaseError("The configured SQLite database must use a file path.") from error
     if not target.parent.is_dir():
         raise DatabaseError(f"Database directory does not exist: '{target.parent}'.")
     if target.is_symlink() or (target.exists() and not target.is_file()):
@@ -135,16 +141,6 @@ def _prepare_non_sqlite(
             engine.dispose()
 
 
-def _sqlite_file_path(configured_url: URL) -> Path | None:
-    database = configured_url.database
-    if database in {None, "", ":memory:"}:
-        return None
-    path = Path(database)
-    if not path.is_absolute():
-        path = Path.cwd() / path
-    return Path(os.path.abspath(path))
-
-
 def _legacy_discovery_is_enabled(settings: Settings) -> bool:
     default_url = runtime_paths.sqlite_url_for_path(settings.database_path)
     return settings.database_url == default_url and "database_url" not in settings.model_fields_set
@@ -171,7 +167,7 @@ def _discover_legacy_database(search_directory: Path, target: Path) -> _LegacyCa
 
         fingerprint = _fingerprint(candidate)
         try:
-            _verify_sqlite_integrity(candidate, read_only=True)
+            verify_sqlite_integrity(candidate)
         except DatabaseError as error:
             raise DatabaseError(f"Legacy database candidate is invalid: '{candidate}'.") from error
         if _fingerprint(candidate) != fingerprint:
@@ -224,18 +220,12 @@ def _prepare_sqlite_file(
 
 def _backup_sqlite(source: Path, destination: Path) -> None:
     try:
-        with closing(_open_read_only_sqlite(source)) as source_connection:
+        with closing(open_read_only_sqlite(source)) as source_connection:
             with closing(sqlite3.connect(destination)) as destination_connection:
                 source_connection.backup(destination_connection)
                 destination_connection.commit()
     except sqlite3.Error as error:
         raise DatabaseError(f"Database copy failed for '{source}'.") from error
-
-
-def _open_read_only_sqlite(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
-    connection.execute("PRAGMA query_only = ON")
-    return connection
 
 
 def _prepare_sqlite_staging(
@@ -252,7 +242,7 @@ def _prepare_sqlite_staging(
             validate_schema(connection)
         engine.dispose()
         engine = None
-        _verify_sqlite_integrity(_sqlite_file_path(make_url(database_url)), read_only=False)
+        verify_sqlite_integrity(sqlite_file_path(database_url), verify_foreign_keys=True)
         return outcome
     except DatabaseError:
         raise
@@ -288,26 +278,6 @@ def _prepare_connection(
 
     run_upgrade(config, connection)
     return PreparationOutcome.CREATED
-
-
-def _verify_sqlite_integrity(path: Path | None, *, read_only: bool) -> None:
-    if path is None:
-        raise DatabaseError("The configured SQLite database path is invalid.")
-    try:
-        connection = _open_read_only_sqlite(path) if read_only else sqlite3.connect(path.resolve())
-        with closing(connection):
-            if not read_only:
-                connection.execute("PRAGMA foreign_keys = ON")
-                foreign_keys = connection.execute("PRAGMA foreign_keys").fetchall()
-                if foreign_keys != [(1,)]:
-                    raise DatabaseError("SQLite foreign key enforcement could not be enabled.")
-            result = connection.execute("PRAGMA integrity_check").fetchall()
-    except DatabaseError:
-        raise
-    except sqlite3.Error as error:
-        raise DatabaseError(f"SQLite integrity validation failed for '{path}'.") from error
-    if result != [("ok",)]:
-        raise DatabaseError(f"SQLite integrity validation failed for '{path}'.")
 
 
 def _fingerprint(path: Path) -> _FileFingerprint:
