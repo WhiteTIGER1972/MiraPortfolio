@@ -7,6 +7,9 @@ import pytest
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.core.settings import Settings
+from app.infrastructure.persistence.database_backup import SQLiteBackupService
+from app.infrastructure.persistence.database_preparation import prepare_database
 from app.infrastructure.persistence.sqlalchemy import models
 from app.infrastructure.persistence.sqlalchemy.base import Base
 from app.infrastructure.persistence.sqlalchemy.session import (
@@ -15,6 +18,29 @@ from app.infrastructure.persistence.sqlalchemy.session import (
 )
 
 del models
+
+
+@pytest.fixture
+def backup_settings(tmp_path: Path) -> Settings:
+    """Return settings with a current SQLite database and isolated backup directory."""
+    root = tmp_path / "backup-fixture"
+    root.mkdir()
+    database = root / "portfolio.db"
+    settings = Settings(
+        _env_file=None,
+        database_url=f"sqlite:///{database.as_posix()}",
+        database_path=database,
+        database_directory=root,
+        backup_directory=root / "backups",
+    )
+    prepare_database(settings, legacy_search_directory=root)
+    return settings
+
+
+@pytest.fixture
+def backup_service(backup_settings: Settings) -> SQLiteBackupService:
+    """Return the real backup implementation for an isolated current database."""
+    return SQLiteBackupService(backup_settings)
 
 
 @pytest.fixture

@@ -7,21 +7,25 @@ from dataclasses import FrozenInstanceError, fields
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import get_type_hints
+from typing import cast, get_type_hints
 from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import event
 
+from app.application.backup import BackupService
 from app.application.commands import (
     CreateAssetCommand,
     CreatePortfolioCommand,
     RecordMarketPriceCommand,
 )
+from app.application.diagnostics import DiagnosticsService
+from app.application.preferences import PreferencesService
 from app.application.queries import (
     GetPortfolioDashboardQuery,
     ListAssetsQuery,
 )
+from app.application.restore import RestoreService
 from app.application.services import (
     AssetApplicationService,
     DefaultAssetApplicationService,
@@ -39,6 +43,10 @@ from app.core.settings import Settings
 from app.domain.entities.asset import AssetType
 from app.domain.value_objects.currency import Currency
 from app.infrastructure.database import DatabaseManager
+from app.infrastructure.diagnostics import SupportBundleDiagnosticsService
+from app.infrastructure.persistence.database_backup import SQLiteBackupService
+from app.infrastructure.persistence.database_preparation import prepare_database
+from app.infrastructure.persistence.database_restore import SQLiteRestoreService
 from app.infrastructure.persistence.sqlalchemy.unit_of_work import (
     SQLAlchemyUnitOfWork,
 )
@@ -52,10 +60,12 @@ def make_settings(tmp_path: Path, name: str = "composition") -> Settings:
     root.mkdir(parents=True, exist_ok=True)
     return Settings(
         database_url=f"sqlite:///{(root / 'portfolio.db').as_posix()}",
+        data_directory=root / "data",
         cache_directory=root / "cache",
         database_directory=root / "data",
         export_directory=root / "exports",
         backup_directory=root / "backups",
+        log_directory=root / "logs",
     )
 
 
@@ -65,6 +75,7 @@ def initialized_manager(
 ) -> Iterator[tuple[Settings, DatabaseManager]]:
     """Yield an initialized manager backed only by an isolated temporary database."""
     settings = make_settings(tmp_path)
+    prepare_database(settings, legacy_search_directory=tmp_path)
     manager = DatabaseManager(settings).initialize()
     try:
         yield settings, manager
@@ -78,6 +89,10 @@ def test_container_has_exact_immutable_typed_fields() -> None:
         "database_manager",
         "session_factory",
         "unit_of_work_factory",
+        "backup_service",
+        "restore_service",
+        "diagnostics_service",
+        "preferences_service",
         "portfolio_application_service",
         "asset_application_service",
         "market_price_application_service",
@@ -85,6 +100,10 @@ def test_container_has_exact_immutable_typed_fields() -> None:
     )
     annotations = get_type_hints(Container)
     assert annotations["unit_of_work_factory"] == Callable[[], UnitOfWork]
+    assert annotations["backup_service"] is BackupService
+    assert annotations["restore_service"] is RestoreService
+    assert annotations["diagnostics_service"] is DiagnosticsService
+    assert annotations["preferences_service"] is PreferencesService
     assert annotations["portfolio_application_service"] is PortfolioApplicationService
     assert annotations["asset_application_service"] is AssetApplicationService
     assert annotations["market_price_application_service"] is MarketPriceApplicationService
@@ -108,6 +127,23 @@ def test_build_container_preserves_supplied_lifecycle_dependencies(
         assert container.session_factory is manager.session_factory
 
 
+def test_build_container_exposes_supplied_preferences_without_io(tmp_path: Path) -> None:
+    with initialized_manager(tmp_path) as (settings, manager):
+        service = Mock(spec=PreferencesService)
+
+        container = build_container(
+            settings,
+            manager,
+            cast(PreferencesService, service),
+        )
+
+        assert container.preferences_service is service
+        service.get_current.assert_not_called()
+        service.save.assert_not_called()
+        service.reset.assert_not_called()
+        service.reload.assert_not_called()
+
+
 def test_build_container_constructs_services_behind_abstract_contracts(
     tmp_path: Path,
 ) -> None:
@@ -124,6 +160,18 @@ def test_build_container_constructs_services_behind_abstract_contracts(
             container.portfolio_dashboard_query_service,
             PortfolioDashboardQueryService,
         )
+        assert isinstance(container.backup_service, BackupService)
+        assert type(container.backup_service) is SQLiteBackupService
+        assert getattr(container.backup_service, "_settings") is settings
+        assert isinstance(container.restore_service, RestoreService)
+        assert type(container.restore_service) is SQLiteRestoreService
+        assert getattr(container.restore_service, "_settings") is settings
+        assert isinstance(container.diagnostics_service, DiagnosticsService)
+        assert type(container.diagnostics_service) is SupportBundleDiagnosticsService
+        assert getattr(container.diagnostics_service, "_settings") is settings
+        assert getattr(container.diagnostics_service, "_database_manager") is manager
+        assert isinstance(container.preferences_service, PreferencesService)
+        assert getattr(container.preferences_service, "_settings") is settings
         assert type(container.portfolio_application_service) is DefaultPortfolioApplicationService
         assert type(container.asset_application_service) is DefaultAssetApplicationService
         assert (
@@ -219,6 +267,10 @@ def test_container_is_frozen(
         for field_name, replacement in (
             ("settings", settings.model_copy()),
             ("unit_of_work_factory", lambda: None),
+            ("backup_service", object()),
+            ("restore_service", object()),
+            ("diagnostics_service", object()),
+            ("preferences_service", object()),
             ("asset_application_service", object()),
         ):
             with pytest.raises(FrozenInstanceError):
@@ -230,6 +282,8 @@ def test_independent_containers_do_not_share_factories_services_or_data(
 ) -> None:
     first_settings = make_settings(tmp_path, "first")
     second_settings = make_settings(tmp_path, "second")
+    prepare_database(first_settings, legacy_search_directory=tmp_path)
+    prepare_database(second_settings, legacy_search_directory=tmp_path)
     first_manager = DatabaseManager(first_settings).initialize()
     second_manager = DatabaseManager(second_settings).initialize()
     try:
@@ -238,6 +292,10 @@ def test_independent_containers_do_not_share_factories_services_or_data(
 
         assert first is not second
         assert first.unit_of_work_factory is not second.unit_of_work_factory
+        assert first.backup_service is not second.backup_service
+        assert first.restore_service is not second.restore_service
+        assert first.diagnostics_service is not second.diagnostics_service
+        assert first.preferences_service is not second.preferences_service
         assert first.asset_application_service is not second.asset_application_service
         first.asset_application_service.create_asset(
             CreateAssetCommand(
@@ -305,6 +363,13 @@ def test_container_source_constructs_services_without_executing_workflows() -> N
         ".record_market_price(",
         ".get_latest_market_price(",
         ".get_dashboard(",
+        ".create_backup(",
+        ".list_backups(",
+        ".verify_backup(",
+        ".stage_restore(",
+        ".get_pending_restore(",
+        ".cancel_pending_restore(",
+        ".create_support_bundle(",
         ".commit(",
         ".rollback(",
         "Session(",
@@ -312,3 +377,21 @@ def test_container_source_constructs_services_without_executing_workflows() -> N
         ".get_service(",
     ):
         assert forbidden_call not in source
+
+
+def test_container_construction_does_not_create_or_scan_backup_directory(
+    tmp_path: Path,
+) -> None:
+    with initialized_manager(tmp_path) as (settings, manager):
+        assert not settings.backup_directory.exists()
+
+        container = build_container(settings, manager)
+
+        assert isinstance(container.backup_service, BackupService)
+        assert isinstance(container.restore_service, RestoreService)
+        assert isinstance(container.diagnostics_service, DiagnosticsService)
+        assert isinstance(container.preferences_service, PreferencesService)
+        assert not settings.backup_directory.exists()
+        assert not (settings.database_directory / "restore").exists()
+        assert not (settings.export_directory / "support").exists()
+        assert not (settings.data_directory / "settings").exists()

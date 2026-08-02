@@ -2,23 +2,20 @@
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
 from sqlite3 import Connection as SQLiteConnection
 from typing import Self
 
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.exceptions import DatabaseError
 from app.core.settings import Settings
-from app.infrastructure.persistence.sqlalchemy.base import Base
+from app.infrastructure.persistence.sqlalchemy.base import Base as Base
 
 
 class DatabaseManager:
-    """Own database engine, sessions, migrations, health, and shutdown lifecycle."""
+    """Own the runtime database engine, sessions, health, and shutdown lifecycle."""
 
     def __init__(self, settings: Settings) -> None:
         """Create an uninitialized manager for the provided application settings."""
@@ -41,17 +38,25 @@ class DatabaseManager:
         return self._session_factory
 
     def initialize(self) -> Self:
-        """Create the engine, initialize tables, and build the session factory."""
+        """Create the runtime engine and session factory after database preparation."""
         if self._engine is not None:
             return self
 
         try:
             self._engine = create_database_engine(self._settings)
-            initialize_database(self._engine)
             self._session_factory = create_session_factory(self._engine)
-        except SQLAlchemyError as error:
-            self.shutdown()
-            raise DatabaseError("Database initialization failed.") from error
+        except BaseException as error:
+            engine = self._engine
+            self._engine = None
+            self._session_factory = None
+            if engine is not None:
+                try:
+                    engine.dispose()
+                except Exception:
+                    pass
+            if isinstance(error, SQLAlchemyError):
+                raise DatabaseError("Database initialization failed.") from error
+            raise
         return self
 
     def health_check(self) -> bool:
@@ -62,16 +67,6 @@ class DatabaseManager:
         except SQLAlchemyError:
             return False
         return True
-
-    def migrate(self, revision: str = "head") -> None:
-        """Upgrade the database schema to the requested Alembic revision."""
-        project_root = Path(__file__).resolve().parents[2]
-        config = Config(str(project_root / "alembic.ini"))
-        config.set_main_option("sqlalchemy.url", self._settings.database_url)
-        try:
-            command.upgrade(config, revision)
-        except Exception as error:
-            raise DatabaseError(f"Database migration to {revision!r} failed.") from error
 
     def shutdown(self) -> None:
         """Dispose active connections and release database resources."""
@@ -107,14 +102,6 @@ def _configure_sqlite(engine: Engine) -> None:
             cursor.execute("PRAGMA synchronous = NORMAL")
         finally:
             cursor.close()
-
-
-def initialize_database(engine: Engine) -> None:
-    """Create registered tables for a first application run."""
-    try:
-        Base.metadata.create_all(bind=engine)
-    except SQLAlchemyError as error:
-        raise DatabaseError("Database table initialization failed.") from error
 
 
 def create_session_factory(engine: Engine) -> sessionmaker[Session]:

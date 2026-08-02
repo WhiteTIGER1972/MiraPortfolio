@@ -2,14 +2,30 @@
 
 import inspect
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import ClassVar, Self, get_type_hints
+from typing import ClassVar, Self, cast, get_type_hints
 
 import pytest
+from loguru import logger
 
 from app.application import bootstrap
+from app.application.preferences import PreferenceLoadStatus, PreferencesService
+from app.application.restore import RestoreApplicationResult, RestoreOutcome
 from app.core.container import Container
+from app.core.exceptions import DatabaseError, RestoreApplicationError
+from app.core.logging import configure_logging as configure_real_logging
 from app.core.settings import Settings
+from app.infrastructure.persistence.database_preparation import (
+    DatabasePreparationResult,
+    PreparationOutcome,
+)
+from app.infrastructure.preferences import (
+    PreferenceResolution,
+)
+from app.infrastructure.preferences import (
+    resolve_preferences as resolve_real_preferences,
+)
 from app.ui.theme.manager import ThemeManager
 from app.ui.windows.main_window import MainWindow
 
@@ -104,45 +120,111 @@ class BootstrapHarness:
         *,
         healthy: bool = True,
         build_error: Exception | None = None,
+        preparation_error: Exception | None = None,
+        restore_error: Exception | None = None,
     ) -> None:
         root = tmp_path / "bootstrap"
-        self.settings = Settings(
+        data_root = root / "data"
+        self.base_settings = Settings(
             app_name="Mira Test",
             company_name="Mira Company",
             database_url=f"sqlite:///{(root / 'unused.db').as_posix()}",
+            data_directory=data_root,
             cache_directory=root / "cache",
-            database_directory=root / "data",
-            export_directory=root / "exports",
-            backup_directory=root / "backups",
+            database_directory=data_root / "database",
+            export_directory=data_root / "exports",
+            backup_directory=data_root / "backups",
+            log_directory=root / "logs",
         )
+        self._effective_settings: Settings | None = None
         self.events: list[str] = []
         self.manager = FakeDatabaseManager(
-            self.settings,
+            self.base_settings,
             self.events,
             healthy=healthy,
         )
         self.container = object()
         self.build_error = build_error
+        self.preparation_error = preparation_error
+        self.restore_error = restore_error
+        self.restore_calls: list[Settings] = []
+        self.preparation_calls: list[Settings] = []
         self.database_factory_calls: list[Settings] = []
-        self.build_calls: list[tuple[Settings, FakeDatabaseManager]] = []
+        self.build_calls: list[tuple[Settings, FakeDatabaseManager, PreferencesService]] = []
+        self.preferences_service: PreferencesService | None = None
         self.theme_calls: list[FakeApplication] = []
+        self.theme_values: list[str] = []
         self.windows: list[FakeWindow] = []
 
         FakeApplication.existing = None
         FakeApplication.created_arguments = []
-        monkeypatch.setattr(bootstrap, "get_settings", lambda: self.settings)
+        monkeypatch.setattr(bootstrap, "get_settings", lambda: self.base_settings)
+        monkeypatch.setattr(bootstrap, "resolve_preferences", self.resolve_preferences)
         monkeypatch.setattr(bootstrap, "configure_logging", self.configure_logging)
+        monkeypatch.setattr(bootstrap, "apply_pending_restore", self.apply_pending_restore)
+        monkeypatch.setattr(bootstrap, "prepare_database", self.prepare_database)
         monkeypatch.setattr(bootstrap, "DatabaseManager", self.database_manager_factory)
         monkeypatch.setattr(bootstrap, "build_container", self.build_container)
         monkeypatch.setattr(bootstrap, "QApplication", FakeApplication)
         monkeypatch.setattr(ThemeManager, "apply", self.apply_theme)
         monkeypatch.setattr(bootstrap, "MainWindow", self.create_window)
 
+    @property
+    def settings(self) -> Settings:
+        return self._effective_settings or self.base_settings
+
+    def resolve_preferences(self, settings: Settings) -> PreferenceResolution:
+        assert settings is self.base_settings
+        self.events.append("preferences.resolve")
+        return resolve_real_preferences(settings)
+
     def configure_logging(self, settings: Settings) -> None:
-        assert settings is self.settings
+        self.capture_effective_settings(settings)
+        assert settings.log_directory.is_dir()
         self.events.append("logging.configure")
 
+    def capture_effective_settings(self, settings: Settings) -> None:
+        assert settings is not self.base_settings
+        assert settings.model_dump() == self.base_settings.model_dump()
+        self._effective_settings = settings
+        assert settings is self.settings
+
+    def apply_pending_restore(self, settings: Settings) -> RestoreApplicationResult:
+        assert settings is self.settings
+        self.restore_calls.append(settings)
+        self.events.append("database.restore")
+        if self.restore_error is not None:
+            raise self.restore_error
+        return RestoreApplicationResult(
+            request_id=None,
+            outcome=RestoreOutcome.NO_PENDING_RESTORE,
+            restored_backup=None,
+            pre_restore_backup=None,
+            applied_at=datetime(2026, 7, 30, tzinfo=UTC),
+        )
+
+    def prepare_database(self, settings: Settings) -> DatabasePreparationResult:
+        assert settings is self.settings
+        assert all(
+            directory.is_dir()
+            for directory in (
+                settings.data_directory,
+                settings.cache_directory,
+                settings.database_directory,
+                settings.export_directory,
+                settings.backup_directory,
+                settings.log_directory,
+            )
+        )
+        self.preparation_calls.append(settings)
+        self.events.append("database.prepare")
+        if self.preparation_error is not None:
+            raise self.preparation_error
+        return DatabasePreparationResult(PreparationOutcome.ALREADY_CURRENT)
+
     def database_manager_factory(self, settings: Settings) -> FakeDatabaseManager:
+        assert settings is self.settings
+        self.manager.settings = settings
         self.database_factory_calls.append(settings)
         self.events.append("database.construct")
         return self.manager
@@ -151,15 +233,19 @@ class BootstrapHarness:
         self,
         settings: Settings,
         database_manager: FakeDatabaseManager,
+        preferences_service: PreferencesService,
     ) -> object:
-        self.build_calls.append((settings, database_manager))
+        assert settings is self.settings
+        self.preferences_service = preferences_service
+        self.build_calls.append((settings, database_manager, preferences_service))
         self.events.append("container.build")
         if self.build_error is not None:
             raise self.build_error
         return self.container
 
-    def apply_theme(self, application: FakeApplication) -> None:
+    def apply_theme(self, application: FakeApplication, theme: str) -> None:
         self.theme_calls.append(application)
+        self.theme_values.append(theme)
         self.events.append("theme.apply")
 
     def create_window(self, container: object) -> FakeWindow:
@@ -177,18 +263,29 @@ def test_successful_bootstrap_delegates_composition_and_window_injection(
     application = bootstrap.create_application()
 
     assert isinstance(application, FakeApplication)
+    assert harness.preparation_calls == [harness.settings]
+    assert harness.restore_calls == [harness.settings]
     assert harness.database_factory_calls == [harness.settings]
     assert harness.manager.initialize_count == 1
     assert harness.manager.health_check_count == 1
-    assert harness.build_calls == [(harness.settings, harness.manager)]
+    assert harness.preferences_service is not None
+    assert harness.build_calls == [(harness.settings, harness.manager, harness.preferences_service)]
     assert len(harness.windows) == 1
     assert harness.windows[0].container is harness.container
     assert harness.windows[0].show_count == 1
     assert harness.theme_calls == [application]
+    assert harness.theme_values == [harness.settings.theme]
+    assert harness.base_settings is not harness.settings
     assert application.application_name == harness.settings.app_name
     assert application.organization_name == harness.settings.company_name
     assert FakeApplication.created_arguments == [[]]
-    assert harness.events.index("logging.configure") < harness.events.index("database.initialize")
+    assert harness.events.index("preferences.resolve") < harness.events.index("logging.configure")
+    assert harness.events.index("preferences.resolve") < harness.events.index("theme.apply")
+    assert harness.events.index("logging.configure") < harness.events.index("database.prepare")
+    assert harness.events.index("logging.configure") < harness.events.index("database.restore")
+    assert harness.events.index("database.restore") < harness.events.index("database.prepare")
+    assert harness.events.index("database.prepare") < harness.events.index("database.construct")
+    assert harness.events.index("database.construct") < harness.events.index("database.initialize")
     assert harness.events.index("database.health_check") < harness.events.index("container.build")
     assert harness.events.index("container.build") < harness.events.index("theme.apply")
 
@@ -202,12 +299,70 @@ def test_bootstrap_preserves_directory_creation(
     bootstrap.create_application()
 
     for directory in (
+        harness.settings.data_directory,
         harness.settings.cache_directory,
         harness.settings.database_directory,
         harness.settings.export_directory,
         harness.settings.backup_directory,
+        harness.settings.log_directory,
     ):
         assert directory.is_dir()
+
+
+def test_bootstrap_real_logging_contains_no_runtime_path_or_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = BootstrapHarness(monkeypatch, tmp_path)
+
+    def configure_and_record(settings: Settings) -> None:
+        harness.capture_effective_settings(settings)
+        harness.events.append("logging.configure")
+        configure_real_logging(settings)
+
+    monkeypatch.setattr(bootstrap, "configure_logging", configure_and_record)
+    try:
+        bootstrap.create_application()
+        content = (harness.settings.log_directory / "mira-portfolio.log").read_text(
+            encoding="utf-8"
+        )
+    finally:
+        logger.remove()
+
+    assert harness.settings.database_url not in content
+    assert str(harness.settings.data_directory) not in content
+    assert str(harness.settings.database_path) not in content
+    assert "Database restore startup outcome" in content
+    assert "Database preparation completed" in content
+
+
+def test_invalid_preferences_are_preserved_and_logged_without_sensitive_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = BootstrapHarness(monkeypatch, tmp_path)
+    target = harness.base_settings.data_directory / "settings" / "preferences.json"
+    target.parent.mkdir(parents=True)
+    original = (
+        b'{"format_version":1,"preferences":'
+        b'{"log_level":"SECRET_TOKEN","source":"https://private.invalid"}}\n'
+    )
+    target.write_bytes(original)
+    messages: list[str] = []
+    sink_id = logger.add(lambda message: messages.append(str(message)), format="{message}")
+    try:
+        bootstrap.create_application()
+    finally:
+        logger.remove(sink_id)
+
+    assert harness.preferences_service is not None
+    assert harness.preferences_service.get_current().status is PreferenceLoadStatus.INVALID
+    assert target.read_bytes() == original
+    logged = "\n".join(messages)
+    assert "Preferences invalid; format version: none; environment overrides: 0" in logged
+    assert "SECRET_TOKEN" not in logged
+    assert "private.invalid" not in logged
+    assert str(target) not in logged
 
 
 def test_health_check_failure_stops_before_composition_or_ui(
@@ -228,6 +383,55 @@ def test_health_check_failure_stops_before_composition_or_ui(
     assert FakeApplication.created_arguments == []
 
 
+def test_database_preparation_failure_stops_before_manager_container_and_ui(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    failure = DatabaseError("preparation failed")
+    harness = BootstrapHarness(
+        monkeypatch,
+        tmp_path,
+        preparation_error=failure,
+    )
+
+    with pytest.raises(DatabaseError) as raised:
+        bootstrap.create_application()
+
+    assert raised.value is failure
+    assert harness.preparation_calls == [harness.settings]
+    assert harness.database_factory_calls == []
+    assert harness.manager.initialize_count == 0
+    assert harness.manager.health_check_count == 0
+    assert harness.build_calls == []
+    assert harness.theme_calls == []
+    assert harness.windows == []
+    assert FakeApplication.created_arguments == []
+
+
+def test_restore_failure_stops_before_preparation_manager_container_and_ui(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    failure = RestoreApplicationError("restore failed")
+    harness = BootstrapHarness(
+        monkeypatch,
+        tmp_path,
+        restore_error=failure,
+    )
+
+    with pytest.raises(RestoreApplicationError) as raised:
+        bootstrap.create_application()
+
+    assert raised.value is failure
+    assert harness.restore_calls == [harness.settings]
+    assert harness.preparation_calls == []
+    assert harness.database_factory_calls == []
+    assert harness.manager.initialize_count == 0
+    assert harness.build_calls == []
+    assert harness.windows == []
+    assert FakeApplication.created_arguments == []
+
+
 def test_container_build_failure_propagates_before_ui_without_new_translation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -239,8 +443,9 @@ def test_container_build_failure_propagates_before_ui_without_new_translation(
         bootstrap.create_application()
 
     assert raised.value is failure
-    assert harness.build_calls == [(harness.settings, harness.manager)]
-    assert harness.manager.shutdown_count == 0
+    assert harness.preferences_service is not None
+    assert harness.build_calls == [(harness.settings, harness.manager, harness.preferences_service)]
+    assert harness.manager.shutdown_count == 1
     assert harness.theme_calls == []
     assert harness.windows == []
     assert FakeApplication.created_arguments == []
@@ -256,7 +461,7 @@ def test_existing_qapplication_is_reused(
 
     application = bootstrap.create_application()
 
-    assert application is existing
+    assert cast(object, application) is existing
     assert FakeApplication.created_arguments == []
     assert harness.theme_calls == [existing]
     assert harness.windows[0].container is harness.container
@@ -272,7 +477,9 @@ def test_non_gui_qt_instance_fails_explicitly(
     with pytest.raises(RuntimeError, match="non-GUI Qt application"):
         bootstrap.create_application()
 
-    assert harness.build_calls == [(harness.settings, harness.manager)]
+    assert harness.preferences_service is not None
+    assert harness.build_calls == [(harness.settings, harness.manager, harness.preferences_service)]
+    assert harness.manager.shutdown_count == 1
     assert harness.theme_calls == []
     assert harness.windows == []
     assert FakeApplication.created_arguments == []
@@ -289,7 +496,135 @@ def test_shutdown_signal_is_connected_to_initialized_manager(
     assert isinstance(application, FakeApplication)
     assert len(application.aboutToQuit.callbacks) == 1
     application.aboutToQuit.callbacks[0]()
+    application.aboutToQuit.callbacks[0]()
     assert harness.manager.shutdown_count == 1
+
+
+def test_manager_initialization_failure_shuts_down_once_before_container_or_ui(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = BootstrapHarness(monkeypatch, tmp_path)
+    failure = RuntimeError("initialization failed")
+
+    def fail_initialize() -> FakeDatabaseManager:
+        harness.manager.initialize_count += 1
+        harness.events.append("database.initialize")
+        raise failure
+
+    monkeypatch.setattr(harness.manager, "initialize", fail_initialize)
+
+    with pytest.raises(RuntimeError) as raised:
+        bootstrap.create_application()
+
+    assert raised.value is failure
+    assert harness.manager.shutdown_count == 1
+    assert harness.build_calls == []
+    assert harness.windows == []
+
+
+def test_qapplication_construction_failure_shuts_down_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = BootstrapHarness(monkeypatch, tmp_path)
+    failure = RuntimeError("Qt construction failed")
+
+    def fail_construction(self: FakeApplication, arguments: list[str]) -> None:
+        del self, arguments
+        raise failure
+
+    monkeypatch.setattr(FakeApplication, "__init__", fail_construction)
+
+    with pytest.raises(RuntimeError) as raised:
+        bootstrap.create_application()
+
+    assert raised.value is failure
+    assert harness.manager.shutdown_count == 1
+    assert harness.theme_calls == []
+    assert harness.windows == []
+
+
+def test_theme_failure_shuts_down_once_before_window_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = BootstrapHarness(monkeypatch, tmp_path)
+    failure = RuntimeError("theme failed")
+
+    def fail_theme(application: FakeApplication, theme: str) -> None:
+        harness.theme_calls.append(application)
+        harness.theme_values.append(theme)
+        harness.events.append("theme.apply")
+        raise failure
+
+    monkeypatch.setattr(ThemeManager, "apply", fail_theme)
+
+    with pytest.raises(RuntimeError) as raised:
+        bootstrap.create_application()
+
+    assert raised.value is failure
+    assert harness.manager.shutdown_count == 1
+    assert harness.windows == []
+
+
+def test_main_window_construction_failure_shuts_down_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = BootstrapHarness(monkeypatch, tmp_path)
+    failure = RuntimeError("window construction failed")
+
+    def fail_window(_: object) -> FakeWindow:
+        raise failure
+
+    monkeypatch.setattr(bootstrap, "MainWindow", fail_window)
+
+    with pytest.raises(RuntimeError) as raised:
+        bootstrap.create_application()
+
+    assert raised.value is failure
+    assert harness.manager.shutdown_count == 1
+    assert harness.windows == []
+
+
+def test_main_window_show_failure_shuts_down_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = BootstrapHarness(monkeypatch, tmp_path)
+    failure = RuntimeError("window display failed")
+
+    def fail_show(self: FakeWindow) -> None:
+        self.show_count += 1
+        self.events.append("window.show")
+        raise failure
+
+    monkeypatch.setattr(FakeWindow, "show", fail_show)
+
+    with pytest.raises(RuntimeError) as raised:
+        bootstrap.create_application()
+
+    assert raised.value is failure
+    assert harness.manager.shutdown_count == 1
+    assert len(harness.windows) == 1
+    assert harness.windows[0].show_count == 1
+
+
+def test_successful_startup_transfers_lifecycle_without_premature_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = BootstrapHarness(monkeypatch, tmp_path)
+
+    application = bootstrap.create_application()
+
+    assert harness.manager.shutdown_count == 0
+    assert isinstance(application, FakeApplication)
+
+
+def test_public_create_application_signature_remains_argument_free() -> None:
+    assert list(inspect.signature(bootstrap.create_application).parameters) == []
 
 
 def test_bootstrap_source_delegates_graph_construction_without_service_behavior() -> None:
@@ -297,6 +632,7 @@ def test_bootstrap_source_delegates_graph_construction_without_service_behavior(
 
     assert "from app.core.container import build_container" in source
     assert "build_container(" in source
+    assert "apply_pending_restore(settings)" in source
     assert "MainWindow(container)" in source
     assert "Container(" not in source
     for forbidden_text in (

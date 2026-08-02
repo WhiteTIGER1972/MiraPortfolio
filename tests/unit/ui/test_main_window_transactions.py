@@ -335,6 +335,10 @@ class TransactionWindowFactory:
                 asset_application_service=assets,
                 market_price_application_service=prices,
                 portfolio_dashboard_query_service=dashboard_service,
+                preferences_service=object(),
+                backup_service=object(),
+                restore_service=object(),
+                diagnostics_service=object(),
             ),
         )
         window = MainWindow(container)

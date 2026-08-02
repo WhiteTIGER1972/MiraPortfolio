@@ -15,6 +15,7 @@ from sqlalchemy import (
     inspect,
 )
 
+from app.infrastructure.persistence.alembic_support import create_alembic_config
 from app.infrastructure.persistence.sqlalchemy import models
 from app.infrastructure.persistence.sqlalchemy.base import Base
 
@@ -71,9 +72,7 @@ EXPECTED_COLUMNS = {
 
 
 def migration_config(database: Path) -> Config:
-    config = Config("alembic.ini")
-    config.set_main_option("sqlalchemy.url", f"sqlite:///{database.as_posix()}")
-    return config
+    return create_alembic_config(f"sqlite:///{database.as_posix()}")
 
 
 def inspected_engine(database: Path) -> Engine:

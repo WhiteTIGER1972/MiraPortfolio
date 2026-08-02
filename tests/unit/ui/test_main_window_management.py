@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QTableWidget,
 )
 
@@ -223,6 +224,10 @@ class WindowFactory:
                 asset_application_service=assets,
                 market_price_application_service=price_service,
                 portfolio_dashboard_query_service=dashboard_service,
+                preferences_service=object(),
+                backup_service=object(),
+                restore_service=object(),
+                diagnostics_service=object(),
             ),
         )
         window = MainWindow(container)
@@ -728,6 +733,58 @@ def test_main_window_smoke_and_visible_text_are_truthful(
 
     window.close()
     assert not window.isVisible()
+
+
+def test_settings_recovery_button_opens_fresh_parented_dialog_without_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    make_window: WindowFactory,
+) -> None:
+    portfolio = portfolio_summary("Stable selection")
+    portfolio_service = FakePortfolioService((portfolio,))
+    asset_service = FakeAssetService((asset_view("SAFE", "Stable asset"),))
+    window = make_window(portfolio_service, asset_service)
+    selected_before = window._selected_portfolio_id
+    portfolio_calls_before = len(portfolio_service.list_calls)
+    asset_calls_before = len(asset_service.list_calls)
+    instances: list[object] = []
+
+    class ScriptedSettingsRecoveryDialog:
+        def __init__(
+            self,
+            *,
+            preferences_service: object,
+            backup_service: object,
+            restore_service: object,
+            diagnostics_service: object,
+            parent: MainWindow,
+        ) -> None:
+            assert preferences_service is window._preferences_service
+            assert backup_service is window._backup_service
+            assert restore_service is window._restore_service
+            assert diagnostics_service is window._diagnostics_service
+            assert parent is window
+            instances.append(self)
+
+        def exec(self) -> QDialog.DialogCode:
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(
+        main_window_module,
+        "SettingsRecoveryDialog",
+        ScriptedSettingsRecoveryDialog,
+    )
+    button = window.findChild(QPushButton, "settingsRecoveryButton")
+
+    assert button is not None
+    assert button.text() == "Settings & recovery"
+    button.click()
+    button.click()
+
+    assert len(instances) == 2
+    assert instances[0] is not instances[1]
+    assert window._selected_portfolio_id == selected_before
+    assert len(portfolio_service.list_calls) == portfolio_calls_before
+    assert len(asset_service.list_calls) == asset_calls_before
 
 
 def test_ui_source_respects_management_service_boundary() -> None:

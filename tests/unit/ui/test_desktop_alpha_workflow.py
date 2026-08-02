@@ -400,6 +400,10 @@ class DesktopWindowFactory:
                 asset_application_service=harness,
                 market_price_application_service=harness,
                 portfolio_dashboard_query_service=harness,
+                preferences_service=object(),
+                backup_service=object(),
+                restore_service=object(),
+                diagnostics_service=object(),
             ),
         )
         window = MainWindow(container)

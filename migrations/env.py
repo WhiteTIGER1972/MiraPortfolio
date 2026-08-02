@@ -1,7 +1,7 @@
 """Alembic environment for Mira Portfolio persistence metadata."""
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import Connection, engine_from_config, pool
 
 from app.infrastructure.persistence.sqlalchemy import models
 from app.infrastructure.persistence.sqlalchemy.base import Base
@@ -26,7 +26,20 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Run migrations with a short-lived connection."""
+    """Run migrations through a supplied or short-lived connection."""
+    supplied_connection = config.attributes.get("connection")
+    if supplied_connection is not None:
+        if not isinstance(supplied_connection, Connection):
+            raise TypeError("Alembic connection attribute must be a SQLAlchemy Connection.")
+        context.configure(
+            connection=supplied_connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+        return
+
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
