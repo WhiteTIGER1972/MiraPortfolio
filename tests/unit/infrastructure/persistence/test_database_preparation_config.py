@@ -7,6 +7,8 @@ import pytest
 
 from app.infrastructure.persistence.alembic_support import (
     DEFAULT_MIGRATION_SCRIPT_LOCATION,
+    PROJECT_ROOT,
+    _immutable_resource_root,
     create_alembic_config,
 )
 from app.infrastructure.persistence.database_preparation import (
@@ -45,3 +47,20 @@ def test_alembic_configuration_accepts_injected_script_location(tmp_path: Path) 
 
     assert Path(config.get_main_option("script_location")) == script_location.resolve()
     assert DEFAULT_MIGRATION_SCRIPT_LOCATION.is_absolute()
+
+
+def test_immutable_resources_resolve_from_source_module_location() -> None:
+    module = PROJECT_ROOT / "app" / "infrastructure" / "persistence" / "alembic_support.py"
+
+    assert _immutable_resource_root(module) == PROJECT_ROOT
+    assert DEFAULT_MIGRATION_SCRIPT_LOCATION == PROJECT_ROOT / "migrations"
+
+
+def test_immutable_resources_resolve_from_simulated_frozen_internal_layout(
+    tmp_path: Path,
+) -> None:
+    internal = tmp_path / "MiraPortfolio" / "_internal"
+    module = internal / "app" / "infrastructure" / "persistence" / "alembic_support.py"
+
+    assert _immutable_resource_root(module) == internal.resolve()
+    assert _immutable_resource_root(module) / "alembic.ini" == internal.resolve() / "alembic.ini"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
@@ -55,6 +56,23 @@ def test_configures_stderr_and_persistent_file_sinks(
 
     assert "LOGGING_READY" in capsys.readouterr().err
     assert "LOGGING_READY" in read_log(settings)
+
+
+def test_no_console_stream_still_configures_sanitized_persistent_logging(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = logging_settings(tmp_path)
+    monkeypatch.setattr(sys, "stderr", None)
+    monkeypatch.setattr(sys, "__stderr__", None)
+
+    configure_logging(settings)
+    logger.error(r"NO_CONSOLE password=secret-value C:\Users\alice\private.txt")
+    content = read_log(settings)
+
+    assert "NO_CONSOLE" in content
+    assert "secret-value" not in content
+    assert r"C:\Users\alice" not in content
 
 
 def test_reconfiguration_is_idempotent_and_does_not_duplicate_messages(

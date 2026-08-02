@@ -110,6 +110,7 @@ def _create_application(boundary: GlobalErrorBoundary | None) -> QApplication:
         window = MainWindow(container)
         _enter_phase(boundary, IncidentPhase.STARTUP_UI)
         window.show()
+        setattr(application, "_mira_main_window", window)
         logger.info("Mira Portfolio started")
         lifecycle_transferred = True
         return application

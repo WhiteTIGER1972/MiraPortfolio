@@ -14,6 +14,7 @@ mira-portfolio = "app.__main__:main"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "ruff", "black", "mypy", "pre-commit", "types-requests"]
+packaging = ["pyinstaller==6.21.0"]
 
 [tool.black]
 line-length = 88

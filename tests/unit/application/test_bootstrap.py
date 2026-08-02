@@ -273,6 +273,7 @@ def test_successful_bootstrap_delegates_composition_and_window_injection(
     assert len(harness.windows) == 1
     assert harness.windows[0].container is harness.container
     assert harness.windows[0].show_count == 1
+    assert getattr(application, "_mira_main_window") is harness.windows[0]
     assert harness.theme_calls == [application]
     assert harness.theme_values == [harness.settings.theme]
     assert harness.base_settings is not harness.settings

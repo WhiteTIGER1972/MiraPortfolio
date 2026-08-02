@@ -16,7 +16,13 @@ from app.infrastructure.persistence.sqlalchemy.base import Base
 
 del models
 
-PROJECT_ROOT: Final = Path(__file__).resolve().parents[3]
+
+def _immutable_resource_root(module_file: Path) -> Path:
+    """Resolve the source root or frozen ``_internal`` resource root."""
+    return module_file.resolve().parents[3]
+
+
+PROJECT_ROOT: Final = _immutable_resource_root(Path(__file__))
 DEFAULT_MIGRATION_SCRIPT_LOCATION: Final = PROJECT_ROOT / "migrations"
 
 

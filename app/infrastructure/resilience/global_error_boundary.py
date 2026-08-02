@@ -75,7 +75,7 @@ class GlobalErrorBoundary:
         self._incident_logger = incident_logger
         self._dialog_presenter = dialog_presenter
         self._exit_requester = exit_requester
-        self._stderr = stderr if stderr is not None else sys.stderr
+        self._stderr: TextIO | None = stderr if stderr is not None else _available_stderr()
 
         self._original_sys_excepthook: (
             Callable[[type[BaseException], BaseException, TracebackType | None], None] | None
@@ -413,11 +413,22 @@ class GlobalErrorBoundary:
 
     def _write_bounded_stderr(self, message: str) -> None:
         bounded = message[: _FALLBACK_LIMIT - 1] + "\n"
+        stream = self._stderr
+        if stream is None:
+            return
         try:
-            self._stderr.write(bounded)
-            self._stderr.flush()
+            stream.write(bounded)
+            stream.flush()
         except Exception:
             return
+
+
+def _available_stderr() -> TextIO | None:
+    """Return an existing stderr stream, including the interpreter fallback."""
+    for stream in (sys.stderr, sys.__stderr__):
+        if stream is not None:
+            return stream
+    return None
 
 
 __all__ = ["GlobalErrorBoundary"]

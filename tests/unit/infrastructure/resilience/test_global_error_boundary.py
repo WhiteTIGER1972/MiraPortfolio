@@ -191,6 +191,30 @@ def test_logger_failure_falls_back_without_raw_exception_data() -> None:
     assert "logger private value" not in output
 
 
+def test_missing_interpreter_stderr_streams_do_not_recurse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exits: list[int] = []
+
+    def fail_logging(_: ErrorIncident) -> None:
+        raise RuntimeError("private logger failure")
+
+    def fail_dialog(_: ErrorIncident, __: Path | None) -> None:
+        raise RuntimeError("private dialog failure")
+
+    monkeypatch.setattr(sys, "stderr", None)
+    monkeypatch.setattr(sys, "__stderr__", None)
+    boundary = GlobalErrorBoundary(
+        incident_logger=fail_logging,
+        dialog_presenter=fail_dialog,
+        exit_requester=exits.append,
+    )
+
+    assert boundary.handle_exception(raised_error("private root failure"))
+    assert boundary.fatal_incident is not None
+    assert exits == [1]
+
+
 @pytest.mark.parametrize("failing_surface", ("dialog", "exit"))
 def test_dialog_or_exit_failure_falls_back_without_recursion(failing_surface: str) -> None:
     incidents: list[ErrorIncident] = []

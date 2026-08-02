@@ -6,7 +6,7 @@ import sys
 import traceback
 from datetime import timedelta
 from types import TracebackType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TextIO
 from uuid import UUID
 
 from loguru import logger
@@ -49,17 +49,6 @@ def configure_logging(settings: Settings) -> None:
         if not settings.log_directory.is_dir():
             raise OSError("The configured log directory is unavailable.")
         logger.add(
-            sys.stderr,
-            level=settings.log_level,
-            format=_STDERR_FORMAT,
-            filter=sanitize_record,
-            colorize=True,
-            backtrace=False,
-            diagnose=False,
-            enqueue=False,
-            catch=False,
-        )
-        logger.add(
             settings.log_directory / config.LOG_FILENAME,
             level=settings.log_level,
             format=_FILE_FORMAT,
@@ -69,16 +58,37 @@ def configure_logging(settings: Settings) -> None:
             rotation=config.LOG_ROTATION_BYTES,
             retention=timedelta(days=config.LOG_RETENTION_DAYS),
             compression=None,
-            enqueue=False,
             backtrace=False,
             diagnose=False,
+            enqueue=False,
             catch=False,
         )
+        console = _available_stderr()
+        if console is not None:
+            logger.add(
+                console,
+                level=settings.log_level,
+                format=_STDERR_FORMAT,
+                filter=sanitize_record,
+                colorize=True,
+                backtrace=False,
+                diagnose=False,
+                enqueue=False,
+                catch=False,
+            )
     except Exception as error:
         logger.remove()
         raise ConfigurationError(
             "Persistent logging could not be configured; check the log directory."
         ) from error
+
+
+def _available_stderr() -> TextIO | None:
+    """Return a usable interpreter stderr without manufacturing a console stream."""
+    for stream in (sys.stderr, sys.__stderr__):
+        if stream is not None:
+            return stream
+    return None
 
 
 def _redact_message(record: Record, policy: RedactionPolicy) -> str:
