@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.application.backup import BackupService
 from app.application.commands import (
     BuyAssetCommand,
     CreateAssetCommand,
@@ -28,13 +29,16 @@ from app.application.commands import (
     RecordMarketPriceCommand,
     SellAssetCommand,
 )
+from app.application.diagnostics import DiagnosticsService
 from app.application.exceptions import ApplicationError
+from app.application.preferences import PreferencesService
 from app.application.queries import (
     GetPortfolioDashboardQuery,
     GetPortfolioQuery,
     ListAssetsQuery,
     ListPortfoliosQuery,
 )
+from app.application.restore import RestoreService
 from app.application.results import (
     AssetPositionView,
     AssetView,
@@ -74,6 +78,7 @@ from app.ui.dialogs import (
     CreatePortfolioDialog,
     RecordMarketPriceDialog,
     RecordTradeDialog,
+    SettingsRecoveryDialog,
 )
 from app.ui.theme.tokens import Colors, Spacing, Typography
 
@@ -102,6 +107,10 @@ class MainWindow(QMainWindow):
         self._dashboard_service: PortfolioDashboardQueryService = (
             container.portfolio_dashboard_query_service
         )
+        self._preferences_service: PreferencesService = container.preferences_service
+        self._backup_service: BackupService = container.backup_service
+        self._restore_service: RestoreService = container.restore_service
+        self._diagnostics_service: DiagnosticsService = container.diagnostics_service
         self._portfolios: tuple[PortfolioSummary, ...] = ()
         self._assets: tuple[AssetView, ...] = ()
         self._selected_portfolio_id: UUID | None = None
@@ -153,6 +162,15 @@ class MainWindow(QMainWindow):
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
 
+        self._settings_recovery_button = SecondaryButton("Settings & recovery", toolbar)
+        self._settings_recovery_button.setObjectName("settingsRecoveryButton")
+        self._settings_recovery_button.setStyleSheet(
+            f"background: {Colors.SURFACE_RAISED}; border: 1px solid {Colors.BORDER};"
+        )
+        self._settings_recovery_button.clicked.connect(self._open_settings_recovery)
+        toolbar.addWidget(self._settings_recovery_button)
+        toolbar.addSeparator()
+
         self._new_portfolio_button = SecondaryButton("New portfolio", toolbar)
         self._new_portfolio_button.setObjectName("newPortfolioButton")
         self._new_portfolio_button.setStyleSheet(
@@ -167,6 +185,16 @@ class MainWindow(QMainWindow):
         self._add_asset_button.clicked.connect(self._create_asset)
         toolbar.addWidget(self._add_asset_button)
         self.addToolBar(toolbar)
+
+    def _open_settings_recovery(self) -> None:
+        dialog = SettingsRecoveryDialog(
+            preferences_service=self._preferences_service,
+            backup_service=self._backup_service,
+            restore_service=self._restore_service,
+            diagnostics_service=self._diagnostics_service,
+            parent=self,
+        )
+        dialog.exec()
 
     def _build_content(self) -> None:
         central = QWidget(self)
