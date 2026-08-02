@@ -4,12 +4,13 @@ import inspect
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import ClassVar, Self, get_type_hints
+from typing import ClassVar, Self, cast, get_type_hints
 
 import pytest
 from loguru import logger
 
 from app.application import bootstrap
+from app.application.preferences import PreferenceLoadStatus, PreferencesService
 from app.application.restore import RestoreApplicationResult, RestoreOutcome
 from app.core.container import Container
 from app.core.exceptions import DatabaseError, RestoreApplicationError
@@ -18,6 +19,12 @@ from app.core.settings import Settings
 from app.infrastructure.persistence.database_preparation import (
     DatabasePreparationResult,
     PreparationOutcome,
+)
+from app.infrastructure.preferences import (
+    PreferenceResolution,
+)
+from app.infrastructure.preferences import (
+    resolve_preferences as resolve_real_preferences,
 )
 from app.ui.theme.manager import ThemeManager
 from app.ui.windows.main_window import MainWindow
@@ -118,7 +125,7 @@ class BootstrapHarness:
     ) -> None:
         root = tmp_path / "bootstrap"
         data_root = root / "data"
-        self.settings = Settings(
+        self.base_settings = Settings(
             app_name="Mira Test",
             company_name="Mira Company",
             database_url=f"sqlite:///{(root / 'unused.db').as_posix()}",
@@ -129,9 +136,10 @@ class BootstrapHarness:
             backup_directory=data_root / "backups",
             log_directory=root / "logs",
         )
+        self._effective_settings: Settings | None = None
         self.events: list[str] = []
         self.manager = FakeDatabaseManager(
-            self.settings,
+            self.base_settings,
             self.events,
             healthy=healthy,
         )
@@ -142,13 +150,16 @@ class BootstrapHarness:
         self.restore_calls: list[Settings] = []
         self.preparation_calls: list[Settings] = []
         self.database_factory_calls: list[Settings] = []
-        self.build_calls: list[tuple[Settings, FakeDatabaseManager]] = []
+        self.build_calls: list[tuple[Settings, FakeDatabaseManager, PreferencesService]] = []
+        self.preferences_service: PreferencesService | None = None
         self.theme_calls: list[FakeApplication] = []
+        self.theme_values: list[str] = []
         self.windows: list[FakeWindow] = []
 
         FakeApplication.existing = None
         FakeApplication.created_arguments = []
-        monkeypatch.setattr(bootstrap, "get_settings", lambda: self.settings)
+        monkeypatch.setattr(bootstrap, "get_settings", lambda: self.base_settings)
+        monkeypatch.setattr(bootstrap, "resolve_preferences", self.resolve_preferences)
         monkeypatch.setattr(bootstrap, "configure_logging", self.configure_logging)
         monkeypatch.setattr(bootstrap, "apply_pending_restore", self.apply_pending_restore)
         monkeypatch.setattr(bootstrap, "prepare_database", self.prepare_database)
@@ -158,10 +169,25 @@ class BootstrapHarness:
         monkeypatch.setattr(ThemeManager, "apply", self.apply_theme)
         monkeypatch.setattr(bootstrap, "MainWindow", self.create_window)
 
+    @property
+    def settings(self) -> Settings:
+        return self._effective_settings or self.base_settings
+
+    def resolve_preferences(self, settings: Settings) -> PreferenceResolution:
+        assert settings is self.base_settings
+        self.events.append("preferences.resolve")
+        return resolve_real_preferences(settings)
+
     def configure_logging(self, settings: Settings) -> None:
-        assert settings is self.settings
+        self.capture_effective_settings(settings)
         assert settings.log_directory.is_dir()
         self.events.append("logging.configure")
+
+    def capture_effective_settings(self, settings: Settings) -> None:
+        assert settings is not self.base_settings
+        assert settings.model_dump() == self.base_settings.model_dump()
+        self._effective_settings = settings
+        assert settings is self.settings
 
     def apply_pending_restore(self, settings: Settings) -> RestoreApplicationResult:
         assert settings is self.settings
@@ -197,6 +223,8 @@ class BootstrapHarness:
         return DatabasePreparationResult(PreparationOutcome.ALREADY_CURRENT)
 
     def database_manager_factory(self, settings: Settings) -> FakeDatabaseManager:
+        assert settings is self.settings
+        self.manager.settings = settings
         self.database_factory_calls.append(settings)
         self.events.append("database.construct")
         return self.manager
@@ -205,15 +233,19 @@ class BootstrapHarness:
         self,
         settings: Settings,
         database_manager: FakeDatabaseManager,
+        preferences_service: PreferencesService,
     ) -> object:
-        self.build_calls.append((settings, database_manager))
+        assert settings is self.settings
+        self.preferences_service = preferences_service
+        self.build_calls.append((settings, database_manager, preferences_service))
         self.events.append("container.build")
         if self.build_error is not None:
             raise self.build_error
         return self.container
 
-    def apply_theme(self, application: FakeApplication) -> None:
+    def apply_theme(self, application: FakeApplication, theme: str) -> None:
         self.theme_calls.append(application)
+        self.theme_values.append(theme)
         self.events.append("theme.apply")
 
     def create_window(self, container: object) -> FakeWindow:
@@ -236,14 +268,19 @@ def test_successful_bootstrap_delegates_composition_and_window_injection(
     assert harness.database_factory_calls == [harness.settings]
     assert harness.manager.initialize_count == 1
     assert harness.manager.health_check_count == 1
-    assert harness.build_calls == [(harness.settings, harness.manager)]
+    assert harness.preferences_service is not None
+    assert harness.build_calls == [(harness.settings, harness.manager, harness.preferences_service)]
     assert len(harness.windows) == 1
     assert harness.windows[0].container is harness.container
     assert harness.windows[0].show_count == 1
     assert harness.theme_calls == [application]
+    assert harness.theme_values == [harness.settings.theme]
+    assert harness.base_settings is not harness.settings
     assert application.application_name == harness.settings.app_name
     assert application.organization_name == harness.settings.company_name
     assert FakeApplication.created_arguments == [[]]
+    assert harness.events.index("preferences.resolve") < harness.events.index("logging.configure")
+    assert harness.events.index("preferences.resolve") < harness.events.index("theme.apply")
     assert harness.events.index("logging.configure") < harness.events.index("database.prepare")
     assert harness.events.index("logging.configure") < harness.events.index("database.restore")
     assert harness.events.index("database.restore") < harness.events.index("database.prepare")
@@ -279,6 +316,7 @@ def test_bootstrap_real_logging_contains_no_runtime_path_or_database_url(
     harness = BootstrapHarness(monkeypatch, tmp_path)
 
     def configure_and_record(settings: Settings) -> None:
+        harness.capture_effective_settings(settings)
         harness.events.append("logging.configure")
         configure_real_logging(settings)
 
@@ -296,6 +334,35 @@ def test_bootstrap_real_logging_contains_no_runtime_path_or_database_url(
     assert str(harness.settings.database_path) not in content
     assert "Database restore startup outcome" in content
     assert "Database preparation completed" in content
+
+
+def test_invalid_preferences_are_preserved_and_logged_without_sensitive_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = BootstrapHarness(monkeypatch, tmp_path)
+    target = harness.base_settings.data_directory / "settings" / "preferences.json"
+    target.parent.mkdir(parents=True)
+    original = (
+        b'{"format_version":1,"preferences":'
+        b'{"log_level":"SECRET_TOKEN","source":"https://private.invalid"}}\n'
+    )
+    target.write_bytes(original)
+    messages: list[str] = []
+    sink_id = logger.add(lambda message: messages.append(str(message)), format="{message}")
+    try:
+        bootstrap.create_application()
+    finally:
+        logger.remove(sink_id)
+
+    assert harness.preferences_service is not None
+    assert harness.preferences_service.get_current().status is PreferenceLoadStatus.INVALID
+    assert target.read_bytes() == original
+    logged = "\n".join(messages)
+    assert "Preferences invalid; format version: none; environment overrides: 0" in logged
+    assert "SECRET_TOKEN" not in logged
+    assert "private.invalid" not in logged
+    assert str(target) not in logged
 
 
 def test_health_check_failure_stops_before_composition_or_ui(
@@ -376,7 +443,8 @@ def test_container_build_failure_propagates_before_ui_without_new_translation(
         bootstrap.create_application()
 
     assert raised.value is failure
-    assert harness.build_calls == [(harness.settings, harness.manager)]
+    assert harness.preferences_service is not None
+    assert harness.build_calls == [(harness.settings, harness.manager, harness.preferences_service)]
     assert harness.manager.shutdown_count == 1
     assert harness.theme_calls == []
     assert harness.windows == []
@@ -393,7 +461,7 @@ def test_existing_qapplication_is_reused(
 
     application = bootstrap.create_application()
 
-    assert application is existing
+    assert cast(object, application) is existing
     assert FakeApplication.created_arguments == []
     assert harness.theme_calls == [existing]
     assert harness.windows[0].container is harness.container
@@ -409,7 +477,8 @@ def test_non_gui_qt_instance_fails_explicitly(
     with pytest.raises(RuntimeError, match="non-GUI Qt application"):
         bootstrap.create_application()
 
-    assert harness.build_calls == [(harness.settings, harness.manager)]
+    assert harness.preferences_service is not None
+    assert harness.build_calls == [(harness.settings, harness.manager, harness.preferences_service)]
     assert harness.manager.shutdown_count == 1
     assert harness.theme_calls == []
     assert harness.windows == []
@@ -483,8 +552,9 @@ def test_theme_failure_shuts_down_once_before_window_construction(
     harness = BootstrapHarness(monkeypatch, tmp_path)
     failure = RuntimeError("theme failed")
 
-    def fail_theme(application: FakeApplication) -> None:
+    def fail_theme(application: FakeApplication, theme: str) -> None:
         harness.theme_calls.append(application)
+        harness.theme_values.append(theme)
         harness.events.append("theme.apply")
         raise failure
 

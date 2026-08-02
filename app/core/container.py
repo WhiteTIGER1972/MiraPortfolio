@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.application.backup import BackupService
 from app.application.diagnostics import DiagnosticsService
+from app.application.preferences import PreferencesService
 from app.application.restore import RestoreService
 from app.application.services import (
     AssetApplicationService,
@@ -27,6 +28,7 @@ from app.infrastructure.persistence.database_restore import SQLiteRestoreService
 from app.infrastructure.persistence.sqlalchemy.unit_of_work import (
     SQLAlchemyUnitOfWork,
 )
+from app.infrastructure.preferences import create_unloaded_preferences_service
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +42,7 @@ class Container:
     backup_service: BackupService
     restore_service: RestoreService
     diagnostics_service: DiagnosticsService
+    preferences_service: PreferencesService
     portfolio_application_service: PortfolioApplicationService
     asset_application_service: AssetApplicationService
     market_price_application_service: MarketPriceApplicationService
@@ -49,12 +52,19 @@ class Container:
 def build_container(
     settings: Settings,
     database_manager: DatabaseManager,
+    preferences_service: PreferencesService | None = None,
 ) -> Container:
     """Compose application services around the initialized database manager."""
     session_factory = database_manager.session_factory
 
     def unit_of_work_factory() -> UnitOfWork:
         return SQLAlchemyUnitOfWork(session_factory)
+
+    resolved_preferences_service = (
+        preferences_service
+        if preferences_service is not None
+        else create_unloaded_preferences_service(settings)
+    )
 
     return Container(
         settings=settings,
@@ -67,6 +77,7 @@ def build_container(
             settings,
             database_manager,
         ),
+        preferences_service=resolved_preferences_service,
         portfolio_application_service=DefaultPortfolioApplicationService(
             unit_of_work_factory,
         ),

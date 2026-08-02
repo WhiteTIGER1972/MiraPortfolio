@@ -35,6 +35,16 @@ def default_log_directory() -> Path:
     )
 
 
+def preferences_directory(data_directory: PurePath) -> Path:
+    """Return the deterministic preference directory without creating it."""
+    return Path(data_directory) / config.PREFERENCES_DIRECTORY_NAME
+
+
+def preferences_file(data_directory: PurePath) -> Path:
+    """Return the deterministic versioned preference file path."""
+    return preferences_directory(data_directory) / config.PREFERENCES_FILENAME
+
+
 def sqlite_url_for_path(database_path: PurePath) -> str:
     """Build a SQLAlchemy SQLite URL without altering an absolute path."""
     if not database_path.is_absolute():

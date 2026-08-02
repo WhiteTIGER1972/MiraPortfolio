@@ -7,7 +7,7 @@ from dataclasses import FrozenInstanceError, fields
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import get_type_hints
+from typing import cast, get_type_hints
 from unittest.mock import Mock
 
 import pytest
@@ -20,6 +20,7 @@ from app.application.commands import (
     RecordMarketPriceCommand,
 )
 from app.application.diagnostics import DiagnosticsService
+from app.application.preferences import PreferencesService
 from app.application.queries import (
     GetPortfolioDashboardQuery,
     ListAssetsQuery,
@@ -59,10 +60,12 @@ def make_settings(tmp_path: Path, name: str = "composition") -> Settings:
     root.mkdir(parents=True, exist_ok=True)
     return Settings(
         database_url=f"sqlite:///{(root / 'portfolio.db').as_posix()}",
+        data_directory=root / "data",
         cache_directory=root / "cache",
         database_directory=root / "data",
         export_directory=root / "exports",
         backup_directory=root / "backups",
+        log_directory=root / "logs",
     )
 
 
@@ -89,6 +92,7 @@ def test_container_has_exact_immutable_typed_fields() -> None:
         "backup_service",
         "restore_service",
         "diagnostics_service",
+        "preferences_service",
         "portfolio_application_service",
         "asset_application_service",
         "market_price_application_service",
@@ -99,6 +103,7 @@ def test_container_has_exact_immutable_typed_fields() -> None:
     assert annotations["backup_service"] is BackupService
     assert annotations["restore_service"] is RestoreService
     assert annotations["diagnostics_service"] is DiagnosticsService
+    assert annotations["preferences_service"] is PreferencesService
     assert annotations["portfolio_application_service"] is PortfolioApplicationService
     assert annotations["asset_application_service"] is AssetApplicationService
     assert annotations["market_price_application_service"] is MarketPriceApplicationService
@@ -120,6 +125,23 @@ def test_build_container_preserves_supplied_lifecycle_dependencies(
         assert container.settings is settings
         assert container.database_manager is manager
         assert container.session_factory is manager.session_factory
+
+
+def test_build_container_exposes_supplied_preferences_without_io(tmp_path: Path) -> None:
+    with initialized_manager(tmp_path) as (settings, manager):
+        service = Mock(spec=PreferencesService)
+
+        container = build_container(
+            settings,
+            manager,
+            cast(PreferencesService, service),
+        )
+
+        assert container.preferences_service is service
+        service.get_current.assert_not_called()
+        service.save.assert_not_called()
+        service.reset.assert_not_called()
+        service.reload.assert_not_called()
 
 
 def test_build_container_constructs_services_behind_abstract_contracts(
@@ -148,6 +170,8 @@ def test_build_container_constructs_services_behind_abstract_contracts(
         assert type(container.diagnostics_service) is SupportBundleDiagnosticsService
         assert getattr(container.diagnostics_service, "_settings") is settings
         assert getattr(container.diagnostics_service, "_database_manager") is manager
+        assert isinstance(container.preferences_service, PreferencesService)
+        assert getattr(container.preferences_service, "_settings") is settings
         assert type(container.portfolio_application_service) is DefaultPortfolioApplicationService
         assert type(container.asset_application_service) is DefaultAssetApplicationService
         assert (
@@ -246,6 +270,7 @@ def test_container_is_frozen(
             ("backup_service", object()),
             ("restore_service", object()),
             ("diagnostics_service", object()),
+            ("preferences_service", object()),
             ("asset_application_service", object()),
         ):
             with pytest.raises(FrozenInstanceError):
@@ -270,6 +295,7 @@ def test_independent_containers_do_not_share_factories_services_or_data(
         assert first.backup_service is not second.backup_service
         assert first.restore_service is not second.restore_service
         assert first.diagnostics_service is not second.diagnostics_service
+        assert first.preferences_service is not second.preferences_service
         assert first.asset_application_service is not second.asset_application_service
         first.asset_application_service.create_asset(
             CreateAssetCommand(
@@ -364,6 +390,8 @@ def test_container_construction_does_not_create_or_scan_backup_directory(
         assert isinstance(container.backup_service, BackupService)
         assert isinstance(container.restore_service, RestoreService)
         assert isinstance(container.diagnostics_service, DiagnosticsService)
+        assert isinstance(container.preferences_service, PreferencesService)
         assert not settings.backup_directory.exists()
         assert not (settings.database_directory / "restore").exists()
         assert not (settings.export_directory / "support").exists()
+        assert not (settings.data_directory / "settings").exists()

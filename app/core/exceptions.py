@@ -9,6 +9,22 @@ class ConfigurationError(MiraPortfolioError):
     """Raised when configuration is invalid."""
 
 
+class PreferencesError(MiraPortfolioError):
+    """Base exception for safe user-preference operations."""
+
+
+class PreferenceValidationError(PreferencesError):
+    """Raised when proposed or persisted preference data is invalid."""
+
+
+class PreferencePersistenceError(PreferencesError):
+    """Raised when preferences cannot be installed or removed atomically."""
+
+
+class PreferenceSecurityError(PreferencesError):
+    """Raised when a preference filesystem target is unsafe."""
+
+
 class DatabaseError(MiraPortfolioError):
     """Raised when persistence cannot complete."""
 

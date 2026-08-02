@@ -6,6 +6,7 @@ from collections.abc import Callable
 from loguru import logger
 from PySide6.QtWidgets import QApplication
 
+from app.application.preferences import PreferenceSnapshot
 from app.application.resilience import IncidentPhase
 from app.core.container import build_container
 from app.core.logging import configure_logging
@@ -13,6 +14,7 @@ from app.core.settings import get_settings
 from app.infrastructure.database import DatabaseManager
 from app.infrastructure.persistence.database_preparation import prepare_database
 from app.infrastructure.persistence.database_restore import apply_pending_restore
+from app.infrastructure.preferences import resolve_preferences
 from app.infrastructure.resilience import GlobalErrorBoundary
 from app.ui.application import MiraApplication
 from app.ui.theme.manager import ThemeManager
@@ -32,7 +34,9 @@ def create_application_with_boundary(boundary: GlobalErrorBoundary) -> QApplicat
 def _create_application(boundary: GlobalErrorBoundary | None) -> QApplication:
     """Construct dependencies and transfer lifecycle ownership after window display."""
     _enter_phase(boundary, IncidentPhase.STARTUP_SETTINGS)
-    settings = get_settings()
+    base_settings = get_settings()
+    preference_resolution = resolve_preferences(base_settings)
+    settings = preference_resolution.settings
 
     _enter_phase(boundary, IncidentPhase.STARTUP_DIRECTORIES)
     for directory in (
@@ -49,6 +53,7 @@ def _create_application(boundary: GlobalErrorBoundary | None) -> QApplication:
     configure_logging(settings)
     if boundary is not None:
         boundary.mark_logging_available(settings.log_directory)
+    _log_preference_status(preference_resolution.service.get_current())
 
     database_manager: DatabaseManager | None = None
     shutdown_once: _ShutdownOnce | None = None
@@ -78,6 +83,7 @@ def _create_application(boundary: GlobalErrorBoundary | None) -> QApplication:
         container = build_container(
             settings=settings,
             database_manager=database_manager,
+            preferences_service=preference_resolution.service,
         )
 
         _enter_phase(boundary, IncidentPhase.STARTUP_QT)
@@ -98,7 +104,7 @@ def _create_application(boundary: GlobalErrorBoundary | None) -> QApplication:
         application.aboutToQuit.connect(shutdown_once)
 
         _enter_phase(boundary, IncidentPhase.STARTUP_THEME)
-        ThemeManager.apply(application)
+        ThemeManager.apply(application, settings.theme)
 
         _enter_phase(boundary, IncidentPhase.STARTUP_UI)
         window = MainWindow(container)
@@ -135,6 +141,16 @@ def _enter_phase(
 ) -> None:
     if boundary is not None:
         boundary.enter_phase(phase)
+
+
+def _log_preference_status(snapshot: PreferenceSnapshot) -> None:
+    log = logger.warning if snapshot.warning_category is not None else logger.info
+    log(
+        "Preferences {}; format version: {}; environment overrides: {}",
+        snapshot.status.value,
+        snapshot.format_version if snapshot.format_version is not None else "none",
+        len(snapshot.overridden_by_environment),
+    )
 
 
 __all__ = ["create_application", "create_application_with_boundary"]

@@ -3,6 +3,7 @@
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
+from app.core import config
 from app.ui.theme.tokens import Colors
 
 
@@ -10,8 +11,10 @@ class ThemeManager:
     """Apply the application-wide visual language."""
 
     @staticmethod
-    def apply(application: QApplication) -> None:
+    def apply(application: QApplication, theme: str) -> None:
         """Apply typography and a polished dark stylesheet."""
+        if theme != config.THEME:
+            raise ValueError("The configured application theme is unsupported.")
         application.setFont(QFont("Inter", 10))
         application.setStyleSheet(
             f"\n* {{ color: {Colors.TEXT}; font-family: Inter, Segoe UI, sans-serif; }}\n"

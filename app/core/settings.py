@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     """Load Mira Portfolio settings from environment variables and an optional .env file.
 
     Each setting supports the ``MIRA_`` environment prefix. For example,
-    ``MIRA_THEME=light`` overrides the default theme.
+    ``MIRA_LOG_LEVEL=DEBUG`` overrides the default log level.
     """
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="MIRA_", extra="ignore")
