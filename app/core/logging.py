@@ -7,6 +7,7 @@ import traceback
 from datetime import timedelta
 from types import TracebackType
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from loguru import logger
 
@@ -35,7 +36,7 @@ def configure_logging(settings: Settings) -> None:
     policy = RedactionPolicy.from_settings(settings)
 
     def sanitize_record(record: Record) -> bool:
-        record["message"] = policy.redact(record["message"], identifiers=True)
+        record["message"] = _redact_message(record, policy)
         if "safe_exception" not in record["extra"]:
             record["extra"]["safe_exception"] = _safe_exception_text(
                 record["exception"],
@@ -78,6 +79,24 @@ def configure_logging(settings: Settings) -> None:
         raise ConfigurationError(
             "Persistent logging could not be configured; check the log directory."
         ) from error
+
+
+def _redact_message(record: Record, policy: RedactionPolicy) -> str:
+    """Redact a message while preserving one explicitly generated incident UUID."""
+    incident_value = record["extra"].get("safe_incident_id")
+    if not isinstance(incident_value, str) or not _canonical_uuid(incident_value):
+        return policy.redact(record["message"], identifiers=True)
+    marker = "MIRA_SAFE_INCIDENT_REFERENCE"
+    protected = record["message"].replace(incident_value, marker)
+    return policy.redact(protected, identifiers=True).replace(marker, incident_value)
+
+
+def _canonical_uuid(value: str) -> bool:
+    try:
+        parsed = UUID(value)
+    except ValueError:
+        return False
+    return str(parsed) == value
 
 
 def _safe_exception_text(

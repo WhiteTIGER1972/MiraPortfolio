@@ -55,6 +55,8 @@ from app.domain.value_objects.currency import Currency
 from app.infrastructure.database import DatabaseManager
 from app.infrastructure.persistence.database_preparation import prepare_database
 from app.infrastructure.persistence.sqlalchemy.unit_of_work import SQLAlchemyUnitOfWork
+from app.infrastructure.resilience import GlobalErrorBoundary
+from app.ui.application import MiraApplication
 from app.ui.windows import main_window as main_window_module
 from app.ui.windows.main_window import MainWindow
 
@@ -72,7 +74,12 @@ def qapplication() -> Iterator[QApplication]:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     existing = QApplication.instance()
     if existing is None:
-        application = QApplication([])
+        boundary = GlobalErrorBoundary(
+            incident_logger=lambda _incident: None,
+            dialog_presenter=lambda _incident, _directory: None,
+            exit_requester=lambda _code: None,
+        )
+        application = MiraApplication([], boundary)
     elif isinstance(existing, QApplication):
         application = existing
     else:

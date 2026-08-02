@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from loguru import logger
@@ -128,6 +129,26 @@ def test_runtime_paths_credentials_and_identifiers_are_redacted(tmp_path: Path) 
     assert "<IDENTIFIER>" in content
     assert "diagnostic_password" not in content
     assert identifier not in content
+
+
+def test_explicit_generated_incident_reference_is_preserved_but_other_ids_are_redacted(
+    tmp_path: Path,
+) -> None:
+    settings = logging_settings(tmp_path)
+    configure_logging(settings)
+    incident_id = str(uuid4())
+    unrelated_id = str(uuid4())
+
+    logger.bind(safe_incident_id=incident_id).critical(
+        "error_incident incident_id={} unrelated_id={}",
+        incident_id,
+        unrelated_id,
+    )
+    content = read_log(settings)
+
+    assert incident_id in content
+    assert unrelated_id not in content
+    assert "<IDENTIFIER>" in content
 
 
 def test_rotation_and_retention_are_finite() -> None:

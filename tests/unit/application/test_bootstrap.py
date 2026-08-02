@@ -377,7 +377,7 @@ def test_container_build_failure_propagates_before_ui_without_new_translation(
 
     assert raised.value is failure
     assert harness.build_calls == [(harness.settings, harness.manager)]
-    assert harness.manager.shutdown_count == 0
+    assert harness.manager.shutdown_count == 1
     assert harness.theme_calls == []
     assert harness.windows == []
     assert FakeApplication.created_arguments == []
@@ -410,6 +410,7 @@ def test_non_gui_qt_instance_fails_explicitly(
         bootstrap.create_application()
 
     assert harness.build_calls == [(harness.settings, harness.manager)]
+    assert harness.manager.shutdown_count == 1
     assert harness.theme_calls == []
     assert harness.windows == []
     assert FakeApplication.created_arguments == []
@@ -426,7 +427,134 @@ def test_shutdown_signal_is_connected_to_initialized_manager(
     assert isinstance(application, FakeApplication)
     assert len(application.aboutToQuit.callbacks) == 1
     application.aboutToQuit.callbacks[0]()
+    application.aboutToQuit.callbacks[0]()
     assert harness.manager.shutdown_count == 1
+
+
+def test_manager_initialization_failure_shuts_down_once_before_container_or_ui(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = BootstrapHarness(monkeypatch, tmp_path)
+    failure = RuntimeError("initialization failed")
+
+    def fail_initialize() -> FakeDatabaseManager:
+        harness.manager.initialize_count += 1
+        harness.events.append("database.initialize")
+        raise failure
+
+    monkeypatch.setattr(harness.manager, "initialize", fail_initialize)
+
+    with pytest.raises(RuntimeError) as raised:
+        bootstrap.create_application()
+
+    assert raised.value is failure
+    assert harness.manager.shutdown_count == 1
+    assert harness.build_calls == []
+    assert harness.windows == []
+
+
+def test_qapplication_construction_failure_shuts_down_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = BootstrapHarness(monkeypatch, tmp_path)
+    failure = RuntimeError("Qt construction failed")
+
+    def fail_construction(self: FakeApplication, arguments: list[str]) -> None:
+        del self, arguments
+        raise failure
+
+    monkeypatch.setattr(FakeApplication, "__init__", fail_construction)
+
+    with pytest.raises(RuntimeError) as raised:
+        bootstrap.create_application()
+
+    assert raised.value is failure
+    assert harness.manager.shutdown_count == 1
+    assert harness.theme_calls == []
+    assert harness.windows == []
+
+
+def test_theme_failure_shuts_down_once_before_window_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = BootstrapHarness(monkeypatch, tmp_path)
+    failure = RuntimeError("theme failed")
+
+    def fail_theme(application: FakeApplication) -> None:
+        harness.theme_calls.append(application)
+        harness.events.append("theme.apply")
+        raise failure
+
+    monkeypatch.setattr(ThemeManager, "apply", fail_theme)
+
+    with pytest.raises(RuntimeError) as raised:
+        bootstrap.create_application()
+
+    assert raised.value is failure
+    assert harness.manager.shutdown_count == 1
+    assert harness.windows == []
+
+
+def test_main_window_construction_failure_shuts_down_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = BootstrapHarness(monkeypatch, tmp_path)
+    failure = RuntimeError("window construction failed")
+
+    def fail_window(_: object) -> FakeWindow:
+        raise failure
+
+    monkeypatch.setattr(bootstrap, "MainWindow", fail_window)
+
+    with pytest.raises(RuntimeError) as raised:
+        bootstrap.create_application()
+
+    assert raised.value is failure
+    assert harness.manager.shutdown_count == 1
+    assert harness.windows == []
+
+
+def test_main_window_show_failure_shuts_down_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = BootstrapHarness(monkeypatch, tmp_path)
+    failure = RuntimeError("window display failed")
+
+    def fail_show(self: FakeWindow) -> None:
+        self.show_count += 1
+        self.events.append("window.show")
+        raise failure
+
+    monkeypatch.setattr(FakeWindow, "show", fail_show)
+
+    with pytest.raises(RuntimeError) as raised:
+        bootstrap.create_application()
+
+    assert raised.value is failure
+    assert harness.manager.shutdown_count == 1
+    assert len(harness.windows) == 1
+    assert harness.windows[0].show_count == 1
+
+
+def test_successful_startup_transfers_lifecycle_without_premature_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    harness = BootstrapHarness(monkeypatch, tmp_path)
+
+    application = bootstrap.create_application()
+
+    assert harness.manager.shutdown_count == 0
+    assert isinstance(application, FakeApplication)
+
+
+def test_public_create_application_signature_remains_argument_free() -> None:
+    assert list(inspect.signature(bootstrap.create_application).parameters) == []
 
 
 def test_bootstrap_source_delegates_graph_construction_without_service_behavior() -> None:

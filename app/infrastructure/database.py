@@ -45,9 +45,18 @@ class DatabaseManager:
         try:
             self._engine = create_database_engine(self._settings)
             self._session_factory = create_session_factory(self._engine)
-        except SQLAlchemyError as error:
-            self.shutdown()
-            raise DatabaseError("Database initialization failed.") from error
+        except BaseException as error:
+            engine = self._engine
+            self._engine = None
+            self._session_factory = None
+            if engine is not None:
+                try:
+                    engine.dispose()
+                except Exception:
+                    pass
+            if isinstance(error, SQLAlchemyError):
+                raise DatabaseError("Database initialization failed.") from error
+            raise
         return self
 
     def health_check(self) -> bool:
