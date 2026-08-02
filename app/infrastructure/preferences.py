@@ -23,7 +23,6 @@ from app.application.preferences import (
     PreferenceSnapshot,
     PreferencesService,
     PreferenceWarningCategory,
-    ThemePreference,
     UserPreferences,
 )
 from app.core import config, runtime_paths
@@ -35,12 +34,21 @@ from app.core.exceptions import (
 from app.core.settings import Settings
 
 _APPROVED_FIELDS = frozenset(field.value for field in PreferenceField)
+_LEGACY_FIELDS = frozenset(
+    {"theme", "auto_backup", "auto_snapshot", PreferenceField.LOG_LEVEL.value}
+)
+_LEGACY_THEME_VALUE = "dark"
 _REPARSE_POINT_ATTRIBUTE = 0x400
 
 
 @dataclass(frozen=True, slots=True)
 class _StoredPreferences:
-    theme: ThemePreference | None = None
+    log_level: LogLevelPreference | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _LegacyPreferences:
+    theme: str | None = None
     auto_backup: bool | None = None
     auto_snapshot: bool | None = None
     log_level: LogLevelPreference | None = None
@@ -362,12 +370,7 @@ def create_unloaded_preferences_service(settings: Settings) -> PreferencesServic
 
 def _preferences_from_settings(settings: Settings) -> UserPreferences:
     try:
-        return UserPreferences(
-            theme=ThemePreference(settings.theme),
-            auto_backup=settings.auto_backup,
-            auto_snapshot=settings.auto_snapshot,
-            log_level=LogLevelPreference(settings.log_level),
-        )
+        return UserPreferences(log_level=LogLevelPreference(settings.log_level))
     except (TypeError, ValueError) as error:
         raise PreferenceValidationError(
             "An explicitly configured preference value is unsupported."
@@ -386,21 +389,6 @@ def _resolve_effective_preferences(
 ) -> UserPreferences:
     base = _preferences_from_settings(base_settings)
     return UserPreferences(
-        theme=(
-            base.theme
-            if PreferenceField.THEME in overrides or stored.theme is None
-            else stored.theme
-        ),
-        auto_backup=(
-            base.auto_backup
-            if PreferenceField.AUTO_BACKUP in overrides or stored.auto_backup is None
-            else stored.auto_backup
-        ),
-        auto_snapshot=(
-            base.auto_snapshot
-            if PreferenceField.AUTO_SNAPSHOT in overrides or stored.auto_snapshot is None
-            else stored.auto_snapshot
-        ),
         log_level=(
             base.log_level
             if PreferenceField.LOG_LEVEL in overrides or stored.log_level is None
@@ -411,14 +399,7 @@ def _resolve_effective_preferences(
 
 def _rebuild_settings(base: Settings, preferences: UserPreferences) -> Settings:
     values = base.model_dump()
-    values.update(
-        {
-            "theme": preferences.theme.value,
-            "auto_backup": preferences.auto_backup,
-            "auto_snapshot": preferences.auto_snapshot,
-            "log_level": preferences.log_level.value,
-        }
-    )
+    values[PreferenceField.LOG_LEVEL.value] = preferences.log_level.value
     validated = Settings.model_validate(values)
     changed_values: dict[str, object] = {
         field_name: getattr(validated, field_name)
@@ -450,11 +431,6 @@ def _stored_for_save(
     overrides: frozenset[PreferenceField],
 ) -> _StoredPreferences:
     return _StoredPreferences(
-        theme=None if PreferenceField.THEME in overrides else preferences.theme,
-        auto_backup=(None if PreferenceField.AUTO_BACKUP in overrides else preferences.auto_backup),
-        auto_snapshot=(
-            None if PreferenceField.AUTO_SNAPSHOT in overrides else preferences.auto_snapshot
-        ),
         log_level=(None if PreferenceField.LOG_LEVEL in overrides else preferences.log_level),
     )
 
@@ -463,16 +439,9 @@ def _changed_fields(
     running: UserPreferences,
     proposed: UserPreferences,
 ) -> frozenset[PreferenceField]:
-    changed: set[PreferenceField] = set()
-    if running.theme is not proposed.theme:
-        changed.add(PreferenceField.THEME)
-    if running.auto_backup is not proposed.auto_backup:
-        changed.add(PreferenceField.AUTO_BACKUP)
-    if running.auto_snapshot is not proposed.auto_snapshot:
-        changed.add(PreferenceField.AUTO_SNAPSHOT)
     if running.log_level is not proposed.log_level:
-        changed.add(PreferenceField.LOG_LEVEL)
-    return frozenset(changed)
+        return frozenset({PreferenceField.LOG_LEVEL})
+    return frozenset()
 
 
 def _parse_preference_content(content: bytes) -> _LoadResult:
@@ -497,7 +466,10 @@ def _parse_preference_content(content: bytes) -> _LoadResult:
     version = parsed.get("format_version")
     if isinstance(version, bool) or not isinstance(version, int):
         raise PreferenceValidationError("The preference format version is invalid.")
-    if version != config.PREFERENCES_FORMAT_VERSION:
+    if version not in {
+        config.PREFERENCES_LEGACY_FORMAT_VERSION,
+        config.PREFERENCES_FORMAT_VERSION,
+    }:
         return _LoadResult(
             stored=_StoredPreferences(),
             status=PreferenceLoadStatus.UNSUPPORTED_VERSION,
@@ -508,18 +480,12 @@ def _parse_preference_content(content: bytes) -> _LoadResult:
     values = parsed.get("preferences")
     if not isinstance(values, dict) or not all(isinstance(key, str) for key in values):
         raise PreferenceValidationError("The preference values must contain one object.")
-    if not set(values).issubset(_APPROVED_FIELDS):
-        raise PreferenceValidationError("The preference document contains unknown fields.")
-    theme = _optional_enum(values, PreferenceField.THEME.value, ThemePreference)
-    log_level = _optional_enum(
-        values,
-        PreferenceField.LOG_LEVEL.value,
-        LogLevelPreference,
-    )
-    auto_backup = _optional_boolean(values, PreferenceField.AUTO_BACKUP.value)
-    auto_snapshot = _optional_boolean(values, PreferenceField.AUTO_SNAPSHOT.value)
+    if version == config.PREFERENCES_LEGACY_FORMAT_VERSION:
+        stored = _parse_legacy_preferences(values)
+    else:
+        stored = _parse_current_preferences(values)
     return _LoadResult(
-        stored=_StoredPreferences(theme, auto_backup, auto_snapshot, log_level),
+        stored=stored,
         status=PreferenceLoadStatus.LOADED,
         format_version=version,
         file_exists=True,
@@ -527,14 +493,28 @@ def _parse_preference_content(content: bytes) -> _LoadResult:
     )
 
 
+def _parse_current_preferences(values: dict[object, object]) -> _StoredPreferences:
+    if not set(values).issubset(_APPROVED_FIELDS):
+        raise PreferenceValidationError("The preference document contains unknown fields.")
+    return _StoredPreferences(
+        log_level=_optional_log_level(values, PreferenceField.LOG_LEVEL.value),
+    )
+
+
+def _parse_legacy_preferences(values: dict[object, object]) -> _StoredPreferences:
+    if not set(values).issubset(_LEGACY_FIELDS):
+        raise PreferenceValidationError("The legacy preference document contains unknown fields.")
+    legacy = _LegacyPreferences(
+        theme=_optional_legacy_theme(values, "theme"),
+        auto_backup=_optional_boolean(values, "auto_backup"),
+        auto_snapshot=_optional_boolean(values, "auto_snapshot"),
+        log_level=_optional_log_level(values, PreferenceField.LOG_LEVEL.value),
+    )
+    return _StoredPreferences(log_level=legacy.log_level)
+
+
 def _serialize_preferences(stored: _StoredPreferences) -> bytes:
-    values: dict[str, str | bool] = {}
-    if stored.theme is not None:
-        values[PreferenceField.THEME.value] = stored.theme.value
-    if stored.auto_backup is not None:
-        values[PreferenceField.AUTO_BACKUP.value] = stored.auto_backup
-    if stored.auto_snapshot is not None:
-        values[PreferenceField.AUTO_SNAPSHOT.value] = stored.auto_snapshot
+    values: dict[str, str] = {}
     if stored.log_level is not None:
         values[PreferenceField.LOG_LEVEL.value] = stored.log_level.value
     document: dict[str, object] = {
@@ -553,26 +533,34 @@ def _serialize_preferences(stored: _StoredPreferences) -> bytes:
     ).encode("utf-8")
 
 
-def _optional_enum[PreferenceEnum: (ThemePreference, LogLevelPreference)](
+def _optional_log_level(
     values: dict[object, object],
     key: str,
-    enum_type: type[PreferenceEnum],
-) -> PreferenceEnum | None:
-    value = values.get(key)
-    if value is None:
+) -> LogLevelPreference | None:
+    if key not in values:
         return None
+    value = values[key]
     if not isinstance(value, str):
         raise PreferenceValidationError("A string preference value is invalid.")
     try:
-        return enum_type(value)
+        return LogLevelPreference(value)
     except ValueError as error:
         raise PreferenceValidationError("A string preference value is unsupported.") from error
 
 
-def _optional_boolean(values: dict[object, object], key: str) -> bool | None:
-    value = values.get(key)
-    if value is None:
+def _optional_legacy_theme(values: dict[object, object], key: str) -> str | None:
+    if key not in values:
         return None
+    value = values[key]
+    if not isinstance(value, str) or value != _LEGACY_THEME_VALUE:
+        raise PreferenceValidationError("The legacy theme value is unsupported.")
+    return value
+
+
+def _optional_boolean(values: dict[object, object], key: str) -> bool | None:
+    if key not in values:
+        return None
+    value = values[key]
     if type(value) is not bool:
         raise PreferenceValidationError("A boolean preference value is invalid.")
     return value
@@ -626,7 +614,11 @@ def _read_regular_file(path: Path) -> bytes:
 
 def _verify_stored_file(path: Path, expected: _StoredPreferences) -> None:
     loaded = _parse_preference_content(_read_regular_file(path))
-    if loaded.status is not PreferenceLoadStatus.LOADED or loaded.stored != expected:
+    if (
+        loaded.status is not PreferenceLoadStatus.LOADED
+        or loaded.format_version != config.PREFERENCES_FORMAT_VERSION
+        or loaded.stored != expected
+    ):
         raise PreferenceValidationError("The preference file verification failed.")
 
 

@@ -1,8 +1,9 @@
-"""Strict format, precedence, atomicity, and filesystem-security preference tests."""
+"""Strict v2, legacy v1, precedence, atomicity, and security preference tests."""
 
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -13,7 +14,6 @@ from app.application.preferences import (
     PreferenceField,
     PreferenceLoadStatus,
     PreferenceWarningCategory,
-    ThemePreference,
     UserPreferences,
 )
 from app.core import config, runtime_paths
@@ -21,7 +21,7 @@ from app.core.exceptions import PreferencePersistenceError, PreferenceSecurityEr
 from app.core.settings import Settings
 from app.infrastructure.preferences import resolve_preferences
 
-_APPROVED_ENVIRONMENT_NAMES = (
+_PREFERENCE_ENVIRONMENT_NAMES = (
     "MIRA_THEME",
     "MIRA_AUTO_BACKUP",
     "MIRA_AUTO_SNAPSHOT",
@@ -30,8 +30,8 @@ _APPROVED_ENVIRONMENT_NAMES = (
 
 
 @pytest.fixture(autouse=True)
-def isolate_approved_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    for name in _APPROVED_ENVIRONMENT_NAMES:
+def isolate_preference_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    for name in _PREFERENCE_ENVIRONMENT_NAMES:
         monkeypatch.delenv(name, raising=False)
     yield
 
@@ -62,13 +62,10 @@ def write_raw(settings: Settings, content: bytes) -> Path:
     return target
 
 
-def document(**preferences: object) -> bytes:
+def encoded_document(version: int, values: dict[str, object]) -> bytes:
     return (
         json.dumps(
-            {
-                "format_version": config.PREFERENCES_FORMAT_VERSION,
-                "preferences": preferences,
-            },
+            {"format_version": version, "preferences": values},
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -76,18 +73,22 @@ def document(**preferences: object) -> bytes:
     ).encode("utf-8")
 
 
+def legacy_document(**values: object) -> bytes:
+    return encoded_document(config.PREFERENCES_LEGACY_FORMAT_VERSION, values)
+
+
+def document(**values: object) -> bytes:
+    return encoded_document(config.PREFERENCES_FORMAT_VERSION, values)
+
+
 def proposed_preferences(
-    *,
-    auto_backup: bool = False,
-    auto_snapshot: bool = True,
     log_level: LogLevelPreference = LogLevelPreference.WARNING,
 ) -> UserPreferences:
-    return UserPreferences(
-        theme=ThemePreference.DARK,
-        auto_backup=auto_backup,
-        auto_snapshot=auto_snapshot,
-        log_level=log_level,
-    )
+    return UserPreferences(log_level=log_level)
+
+
+def temporary_artifacts(target: Path) -> list[Path]:
+    return list(target.parent.glob(".preferences-*.tmp"))
 
 
 def test_missing_directory_returns_missing_without_creating_anything(tmp_path: Path) -> None:
@@ -109,38 +110,65 @@ def test_missing_file_returns_missing_without_creating_settings_directory(
     snapshot = resolve_preferences(settings).service.get_current()
 
     assert snapshot.status is PreferenceLoadStatus.MISSING
-    assert not runtime_paths.preferences_directory(settings.data_directory).exists()
+    assert not preference_path(settings).parent.exists()
 
 
-def test_valid_version_one_file_loads_and_overrides_defaults(tmp_path: Path) -> None:
+def test_version_two_log_level_loads_and_overrides_default(tmp_path: Path) -> None:
     settings = preference_settings(tmp_path)
-    write_raw(
-        settings,
-        document(auto_backup=False, log_level="WARNING", theme="dark"),
-    )
+    write_raw(settings, document(log_level="WARNING"))
 
     resolution = resolve_preferences(settings)
     snapshot = resolution.service.get_current()
 
-    assert snapshot.status is PreferenceLoadStatus.LOADED
-    assert snapshot.format_version == 1
-    assert snapshot.preference_file_exists
-    assert resolution.settings.auto_backup is False
     assert resolution.settings.log_level == "WARNING"
-    assert resolution.settings.database_url == settings.database_url
-    assert resolution.settings.database_path == settings.database_path
+    assert resolution.settings.theme == settings.theme
+    assert resolution.settings.auto_backup is settings.auto_backup
+    assert resolution.settings.auto_snapshot is settings.auto_snapshot
+    assert snapshot.status is PreferenceLoadStatus.LOADED
+    assert snapshot.format_version == 2
+    assert snapshot.preferences == proposed_preferences()
+
+
+def test_empty_version_two_preferences_preserve_base_log_level(tmp_path: Path) -> None:
+    settings = preference_settings(tmp_path)
+    write_raw(settings, document())
+
+    snapshot = resolve_preferences(settings).service.get_current()
+
+    assert snapshot.status is PreferenceLoadStatus.LOADED
+    assert snapshot.format_version == 2
+    assert snapshot.preferences.log_level is LogLevelPreference.INFO
+
+
+def test_unknown_top_level_fields_are_rejected(tmp_path: Path) -> None:
+    settings = preference_settings(tmp_path)
+    original = b'{"extra":true,"format_version":2,"preferences":{}}\n'
+    target = write_raw(settings, original)
+
+    snapshot = resolve_preferences(settings).service.get_current()
+
+    assert snapshot.status is PreferenceLoadStatus.INVALID
+    assert target.read_bytes() == original
 
 
 @pytest.mark.parametrize(
-    "content",
-    (
-        b'{"format_version":1,"format_version":1,"preferences":{}}',
-        b'{"format_version":1,"preferences":{"log_level":"INFO","log_level":"ERROR"}}',
-    ),
+    ("field", "value"),
+    [
+        ("theme", "dark"),
+        ("auto_backup", False),
+        ("auto_snapshot", False),
+        ("database_url", "sqlite:///private.db"),
+        ("path", "C:/private/preferences.json"),
+        ("source", "https://private.invalid"),
+    ],
 )
-def test_duplicate_json_keys_are_rejected(tmp_path: Path, content: bytes) -> None:
+def test_version_two_rejects_removed_unknown_path_and_url_fields(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
     settings = preference_settings(tmp_path)
-    write_raw(settings, content)
+    write_raw(settings, encoded_document(config.PREFERENCES_FORMAT_VERSION, {field: value}))
 
     snapshot = resolve_preferences(settings).service.get_current()
 
@@ -148,12 +176,28 @@ def test_duplicate_json_keys_are_rejected(tmp_path: Path, content: bytes) -> Non
     assert snapshot.warning_category is PreferenceWarningCategory.INVALID_FORMAT
 
 
-@pytest.mark.parametrize("constant", ("NaN", "Infinity", "-Infinity"))
+@pytest.mark.parametrize(
+    "content",
+    [
+        b'{"format_version":2,"format_version":2,"preferences":{}}',
+        b'{"format_version":2,"preferences":{"log_level":"INFO","log_level":"ERROR"}}',
+    ],
+)
+def test_duplicate_json_keys_are_rejected(tmp_path: Path, content: bytes) -> None:
+    settings = preference_settings(tmp_path)
+    write_raw(settings, content)
+
+    assert (
+        resolve_preferences(settings).service.get_current().status is PreferenceLoadStatus.INVALID
+    )
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
 def test_nonfinite_json_constants_are_rejected(tmp_path: Path, constant: str) -> None:
     settings = preference_settings(tmp_path)
     write_raw(
         settings,
-        f'{{"format_version":1,"preferences":{{"auto_backup":{constant}}}}}'.encode(),
+        f'{{"format_version":2,"preferences":{{"log_level":{constant}}}}}'.encode(),
     )
 
     assert (
@@ -161,93 +205,183 @@ def test_nonfinite_json_constants_are_rejected(tmp_path: Path, constant: str) ->
     )
 
 
-def test_unknown_top_level_and_preference_fields_are_rejected(tmp_path: Path) -> None:
-    settings = preference_settings(tmp_path)
-    target = write_raw(
-        settings,
-        b'{"format_version":1,"preferences":{},"metadata":"forbidden"}',
-    )
-    assert (
-        resolve_preferences(settings).service.get_current().status is PreferenceLoadStatus.INVALID
-    )
-
-    target.write_bytes(document(unknown_field="value"))
-    assert (
-        resolve_preferences(settings).service.get_current().status is PreferenceLoadStatus.INVALID
-    )
-
-
-def test_unsupported_format_version_is_reported_without_parsing_values(
+def test_oversized_file_is_rejected_before_unbounded_read_and_preserved(
     tmp_path: Path,
 ) -> None:
     settings = preference_settings(tmp_path)
-    write_raw(
-        settings,
-        b'{"format_version":2,"preferences":{"future_field":{"arbitrary":true}}}',
-    )
+    original = b"{" + b"x" * config.PREFERENCES_MAX_FILE_BYTES
+    target = write_raw(settings, original)
 
     snapshot = resolve_preferences(settings).service.get_current()
 
+    assert snapshot.status is PreferenceLoadStatus.INVALID
+    assert target.read_bytes() == original
+
+
+@pytest.mark.parametrize("value", ["VERBOSE", True, None, 7])
+def test_invalid_version_two_log_levels_are_rejected(tmp_path: Path, value: object) -> None:
+    settings = preference_settings(tmp_path)
+    write_raw(settings, document(log_level=value))
+
+    assert (
+        resolve_preferences(settings).service.get_current().status is PreferenceLoadStatus.INVALID
+    )
+
+
+def test_invalid_version_type_and_unsupported_versions_are_distinguished(
+    tmp_path: Path,
+) -> None:
+    settings = preference_settings(tmp_path)
+    write_raw(settings, b'{"format_version":true,"preferences":{}}')
+    assert (
+        resolve_preferences(settings).service.get_current().status is PreferenceLoadStatus.INVALID
+    )
+
+    write_raw(settings, encoded_document(3, {"log_level": "DEBUG"}))
+    snapshot = resolve_preferences(settings).service.get_current()
     assert snapshot.status is PreferenceLoadStatus.UNSUPPORTED_VERSION
-    assert snapshot.format_version == 2
+    assert snapshot.format_version == 3
     assert snapshot.warning_category is PreferenceWarningCategory.UNSUPPORTED_VERSION
 
 
-def test_oversized_file_is_rejected_and_preserved(tmp_path: Path) -> None:
+def test_comments_and_invalid_files_remain_byte_for_byte_unchanged(tmp_path: Path) -> None:
     settings = preference_settings(tmp_path)
-    original = b"{" + (b"x" * config.PREFERENCES_MAX_FILE_BYTES) + b"}"
+    original = b'{"format_version":2,"preferences":{}} // private comment\n'
     target = write_raw(settings, original)
 
-    snapshot = resolve_preferences(settings).service.get_current()
+    resolution = resolve_preferences(settings)
 
-    assert snapshot.status is PreferenceLoadStatus.INVALID
+    assert resolution.settings.model_dump() == settings.model_dump()
+    assert resolution.service.get_current().status is PreferenceLoadStatus.INVALID
     assert target.read_bytes() == original
 
 
-@pytest.mark.parametrize(
-    "preferences",
-    (
-        {"auto_backup": 1},
-        {"auto_snapshot": "false"},
-        {"theme": "light"},
-        {"log_level": "VERBOSE"},
-        {"update_interval": 0},
-        {"update_interval": 999999999},
-        {"database_path": "../private.db"},
-        {"database_url": "postgresql://user:secret@example.test/mira"},
-    ),
-)
-def test_invalid_types_enums_excluded_ranges_paths_and_urls_are_rejected(
+def test_historical_version_one_file_loads_only_its_log_level(tmp_path: Path) -> None:
+    settings = preference_settings(tmp_path).model_copy(update={"theme": "base-theme"})
+    original = legacy_document(
+        theme="dark",
+        auto_backup=False,
+        auto_snapshot=False,
+        log_level="WARNING",
+    )
+    target = write_raw(settings, original)
+
+    resolution = resolve_preferences(settings)
+    snapshot = resolution.service.get_current()
+
+    assert snapshot.status is PreferenceLoadStatus.LOADED
+    assert snapshot.format_version == 1
+    assert snapshot.preferences == proposed_preferences()
+    assert resolution.settings.log_level == "WARNING"
+    assert resolution.settings.theme == "base-theme"
+    assert resolution.settings.auto_backup is True
+    assert resolution.settings.auto_snapshot is True
+    assert target.read_bytes() == original
+
+
+def test_reload_of_version_one_does_not_rewrite_or_mutate_running_settings(
     tmp_path: Path,
-    preferences: dict[str, object],
 ) -> None:
     settings = preference_settings(tmp_path)
-    write_raw(settings, document(**preferences))
-
-    snapshot = resolve_preferences(settings).service.get_current()
-
-    assert snapshot.status is PreferenceLoadStatus.INVALID
-    assert snapshot.preferences.log_level is LogLevelPreference.INFO
-    assert resolution_sensitive_text(snapshot) == ""
-
-
-def resolution_sensitive_text(snapshot: object) -> str:
-    rendered = repr(snapshot)
-    forbidden = ("postgresql://", "private.db", "secret@example")
-    return "".join(value for value in forbidden if value in rendered)
-
-
-def test_invalid_file_remains_byte_for_byte_unchanged(tmp_path: Path) -> None:
-    settings = preference_settings(tmp_path)
-    original = b'{"format_version":1,"preferences":{"log_level":"SECRET"}}\n'
+    original = legacy_document(theme="dark", auto_backup=False, log_level="ERROR")
     target = write_raw(settings, original)
+    resolution = resolve_preferences(settings)
+    running = resolution.settings
 
-    resolve_preferences(settings)
+    snapshot = resolution.service.reload()
 
+    assert snapshot.status is PreferenceLoadStatus.LOADED
+    assert snapshot.format_version == 1
+    assert snapshot.restart_required_fields == frozenset()
+    assert resolution.settings is running
     assert target.read_bytes() == original
 
 
-def test_environment_override_wins_even_when_equal_to_default(
+def test_version_one_unknown_fields_are_rejected(tmp_path: Path) -> None:
+    settings = preference_settings(tmp_path)
+    write_raw(settings, legacy_document(language="en", log_level="INFO"))
+
+    assert (
+        resolve_preferences(settings).service.get_current().status is PreferenceLoadStatus.INVALID
+    )
+
+
+@pytest.mark.parametrize("field", ["auto_backup", "auto_snapshot"])
+@pytest.mark.parametrize("value", [1, "false", None])
+def test_version_one_malformed_booleans_are_rejected(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    settings = preference_settings(tmp_path)
+    write_raw(settings, legacy_document(**{field: value}))
+
+    assert (
+        resolve_preferences(settings).service.get_current().status is PreferenceLoadStatus.INVALID
+    )
+
+
+@pytest.mark.parametrize("theme", ["light", "DARK", None, 1])
+def test_version_one_unsupported_historical_theme_is_rejected(
+    tmp_path: Path,
+    theme: object,
+) -> None:
+    settings = preference_settings(tmp_path)
+    write_raw(settings, legacy_document(theme=theme))
+
+    assert (
+        resolve_preferences(settings).service.get_current().status is PreferenceLoadStatus.INVALID
+    )
+
+
+def test_version_one_theme_validation_is_pinned_to_historical_dark(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = preference_settings(tmp_path)
+    write_raw(settings, legacy_document(theme="dark", log_level="INFO"))
+    monkeypatch.setattr(config, "THEME", "future-theme")
+
+    snapshot = resolve_preferences(settings).service.get_current()
+
+    assert snapshot.status is PreferenceLoadStatus.LOADED
+    assert snapshot.format_version == 1
+
+
+@pytest.mark.parametrize("log_level", ["VERBOSE", True, None])
+def test_version_one_invalid_log_levels_are_rejected(
+    tmp_path: Path,
+    log_level: object,
+) -> None:
+    settings = preference_settings(tmp_path)
+    write_raw(settings, legacy_document(log_level=log_level))
+
+    assert (
+        resolve_preferences(settings).service.get_current().status is PreferenceLoadStatus.INVALID
+    )
+
+
+def test_saving_after_version_one_load_writes_canonical_version_two(tmp_path: Path) -> None:
+    settings = preference_settings(tmp_path)
+    write_raw(
+        settings,
+        legacy_document(
+            theme="dark",
+            auto_backup=False,
+            auto_snapshot=False,
+            log_level="DEBUG",
+        ),
+    )
+    service = resolve_preferences(settings).service
+
+    service.save(proposed_preferences(LogLevelPreference.WARNING))
+
+    assert preference_path(settings).read_bytes() == (
+        b'{"format_version":2,"preferences":{"log_level":"WARNING"}}\n'
+    )
+
+
+def test_environment_override_wins_over_version_two_even_at_default_value(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -259,27 +393,68 @@ def test_environment_override_wins_even_when_equal_to_default(
     snapshot = resolution.service.get_current()
 
     assert resolution.settings.log_level == "INFO"
-    assert PreferenceField.LOG_LEVEL in snapshot.overridden_by_environment
+    assert snapshot.overridden_by_environment == frozenset({PreferenceField.LOG_LEVEL})
 
 
-def test_dotenv_override_wins_over_persisted_preference(
+def test_environment_override_wins_over_version_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MIRA_LOG_LEVEL", "ERROR")
+    settings = preference_settings(tmp_path)
+    write_raw(settings, legacy_document(theme="dark", log_level="DEBUG"))
+
+    resolution = resolve_preferences(settings)
+
+    assert resolution.settings.log_level == "ERROR"
+    assert resolution.service.get_current().format_version == 1
+    assert resolution.service.get_current().overridden_by_environment == frozenset(
+        {PreferenceField.LOG_LEVEL}
+    )
+
+
+def test_dotenv_log_level_override_wins_and_removed_fields_remain_settings_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     env_file = tmp_path / ".env"
-    env_file.write_text("MIRA_AUTO_BACKUP=false\nMIRA_LOG_LEVEL=ERROR\n", encoding="utf-8")
+    env_file.write_text(
+        "MIRA_THEME=dark\nMIRA_AUTO_BACKUP=false\nMIRA_AUTO_SNAPSHOT=false\nMIRA_LOG_LEVEL=ERROR\n",
+        encoding="utf-8",
+    )
     monkeypatch.chdir(tmp_path)
     settings = preference_settings(tmp_path)
-    write_raw(settings, document(auto_backup=True, log_level="DEBUG"))
+    write_raw(settings, document(log_level="DEBUG"))
 
     resolution = resolve_preferences(settings)
     snapshot = resolution.service.get_current()
 
+    assert resolution.settings.theme == "dark"
     assert resolution.settings.auto_backup is False
+    assert resolution.settings.auto_snapshot is False
     assert resolution.settings.log_level == "ERROR"
-    assert snapshot.overridden_by_environment == frozenset(
-        {PreferenceField.AUTO_BACKUP, PreferenceField.LOG_LEVEL}
-    )
+    assert snapshot.overridden_by_environment == frozenset({PreferenceField.LOG_LEVEL})
+
+
+def test_removed_environment_fields_affect_settings_not_preference_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MIRA_THEME", "dark")
+    monkeypatch.setenv("MIRA_AUTO_BACKUP", "false")
+    monkeypatch.setenv("MIRA_AUTO_SNAPSHOT", "false")
+    settings = preference_settings(tmp_path)
+    write_raw(settings, document(log_level="WARNING"))
+
+    resolution = resolve_preferences(settings)
+    snapshot = resolution.service.get_current()
+
+    assert resolution.settings.theme == "dark"
+    assert resolution.settings.auto_backup is False
+    assert resolution.settings.auto_snapshot is False
+    assert resolution.settings.log_level == "WARNING"
+    assert snapshot.overridden_by_environment == frozenset()
+    assert snapshot.preferences == proposed_preferences()
 
 
 def test_unrelated_environment_value_is_not_exposed(
@@ -295,17 +470,6 @@ def test_unrelated_environment_value_is_not_exposed(
     assert snapshot.overridden_by_environment == frozenset()
 
 
-def test_invalid_and_missing_preferences_preserve_base_settings(tmp_path: Path) -> None:
-    settings = preference_settings(tmp_path)
-    missing = resolve_preferences(settings)
-    assert missing.settings.model_dump() == settings.model_dump()
-
-    write_raw(settings, b"not-json")
-    invalid = resolve_preferences(settings)
-    assert invalid.settings.model_dump() == settings.model_dump()
-    assert invalid.service.get_current().status is PreferenceLoadStatus.INVALID
-
-
 def test_resolution_preserves_unrelated_settings_source_metadata(tmp_path: Path) -> None:
     root = tmp_path / "metadata-runtime"
     settings = Settings(
@@ -317,16 +481,13 @@ def test_resolution_preserves_unrelated_settings_source_metadata(tmp_path: Path)
         log_directory=root / "logs",
     )
     assert "database_url" not in settings.model_fields_set
+    write_raw(settings, document(log_level="ERROR"))
 
-    missing = resolve_preferences(settings).settings
-    write_raw(settings, document(auto_backup=False))
     loaded = resolve_preferences(settings).settings
 
-    assert missing is not settings
-    assert missing.model_fields_set == settings.model_fields_set
     assert "database_url" not in loaded.model_fields_set
     assert "database_path" not in loaded.model_fields_set
-    assert PreferenceField.AUTO_BACKUP.value in loaded.model_fields_set
+    assert PreferenceField.LOG_LEVEL.value in loaded.model_fields_set
 
 
 def test_explicit_save_creates_only_dedicated_directory_and_is_deterministic(
@@ -343,12 +504,30 @@ def test_explicit_save_creates_only_dedicated_directory_and_is_deterministic(
     second = preference_path(settings).read_bytes()
 
     assert first == second
-    assert first == (
-        b'{"format_version":1,"preferences":{"auto_backup":false,'
-        b'"auto_snapshot":true,"log_level":"WARNING","theme":"dark"}}\n'
-    )
+    assert first == b'{"format_version":2,"preferences":{"log_level":"WARNING"}}\n'
+    assert b"theme" not in first
+    assert b"auto_backup" not in first
+    assert b"auto_snapshot" not in first
     assert preference_path(settings).parent.is_dir()
-    assert list(preference_path(settings).parent.glob("*.tmp")) == []
+    assert temporary_artifacts(preference_path(settings)) == []
+
+
+def test_environment_owned_save_writes_empty_version_two_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MIRA_LOG_LEVEL", "ERROR")
+    settings = preference_settings(tmp_path)
+    settings.data_directory.mkdir()
+    resolution = resolve_preferences(settings)
+
+    result = resolution.service.save(proposed_preferences(LogLevelPreference.DEBUG))
+
+    assert preference_path(settings).read_bytes() == b'{"format_version":2,"preferences":{}}\n'
+    assert result.preferences.log_level is LogLevelPreference.ERROR
+    assert result.overridden_by_environment == frozenset({PreferenceField.LOG_LEVEL})
+    assert result.restart_required_fields == frozenset()
+    assert resolution.settings.log_level == "ERROR"
 
 
 def test_save_flushes_file_and_attempts_directory_durability(tmp_path: Path) -> None:
@@ -368,9 +547,11 @@ def test_save_flushes_file_and_attempts_directory_durability(tmp_path: Path) -> 
     assert directory_syncs == [runtime_paths.preferences_directory(settings.data_directory)]
 
 
-def test_file_fsync_failure_leaves_existing_file_unchanged(tmp_path: Path) -> None:
+def test_file_fsync_failure_leaves_existing_file_unchanged_and_cleans_temps(
+    tmp_path: Path,
+) -> None:
     settings = preference_settings(tmp_path)
-    original = document(log_level="INFO")
+    original = legacy_document(theme="dark", log_level="INFO")
     target = write_raw(settings, original)
 
     def fail_sync(_: int) -> None:
@@ -382,10 +563,12 @@ def test_file_fsync_failure_leaves_existing_file_unchanged(tmp_path: Path) -> No
         service.save(proposed_preferences())
 
     assert target.read_bytes() == original
-    assert list(target.parent.glob(".preferences-*.tmp")) == []
+    assert temporary_artifacts(target) == []
 
 
-def test_replace_failure_leaves_existing_file_unchanged(tmp_path: Path) -> None:
+def test_replace_failure_leaves_existing_file_unchanged_and_cleans_temps(
+    tmp_path: Path,
+) -> None:
     settings = preference_settings(tmp_path)
     original = document(log_level="INFO")
     target = write_raw(settings, original)
@@ -399,10 +582,12 @@ def test_replace_failure_leaves_existing_file_unchanged(tmp_path: Path) -> None:
         service.save(proposed_preferences())
 
     assert target.read_bytes() == original
-    assert list(target.parent.glob(".preferences-*.tmp")) == []
+    assert temporary_artifacts(target) == []
 
 
-def test_final_verification_failure_rolls_back_existing_file(tmp_path: Path) -> None:
+def test_final_verification_failure_rolls_back_existing_file_and_cleans_temps(
+    tmp_path: Path,
+) -> None:
     settings = preference_settings(tmp_path)
     original = document(log_level="INFO")
     target = write_raw(settings, original)
@@ -419,10 +604,10 @@ def test_final_verification_failure_rolls_back_existing_file(tmp_path: Path) -> 
         service.save(proposed_preferences())
 
     assert target.read_bytes() == original
-    assert list(target.parent.glob(".preferences-*.tmp")) == []
+    assert temporary_artifacts(target) == []
 
 
-def test_symlinked_or_nonregular_final_target_is_rejected(tmp_path: Path) -> None:
+def test_symlink_reparse_and_nonregular_final_targets_are_rejected(tmp_path: Path) -> None:
     settings = preference_settings(tmp_path)
     target = preference_path(settings)
     target.parent.mkdir(parents=True)
@@ -431,24 +616,45 @@ def test_symlinked_or_nonregular_final_target_is_rejected(tmp_path: Path) -> Non
     try:
         target.symlink_to(outside)
     except OSError:
-        pytest.skip("Symlinks are unavailable in this test environment.")
+        pytest.skip("Symlinks and reparse points are unavailable in this environment.")
 
     resolution = resolve_preferences(settings)
     assert resolution.service.get_current().warning_category is PreferenceWarningCategory.SECURITY
     with pytest.raises(PreferenceSecurityError):
         resolution.service.save(proposed_preferences())
+    with pytest.raises(PreferenceSecurityError):
+        resolution.service.reset()
 
     target.unlink()
     target.mkdir()
     resolution = resolve_preferences(settings)
+    with pytest.raises(PreferenceSecurityError):
+        resolution.service.save(proposed_preferences())
+    with pytest.raises(PreferenceSecurityError):
+        resolution.service.reset()
+
+
+def test_hardlinked_final_target_is_rejected_for_save_and_reset(tmp_path: Path) -> None:
+    settings = preference_settings(tmp_path)
+    target = preference_path(settings)
+    target.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(document(log_level="INFO"))
+    try:
+        os.link(outside, target)
+    except OSError:
+        pytest.skip("Hardlinks are unavailable in this environment.")
+
+    resolution = resolve_preferences(settings)
     assert resolution.service.get_current().warning_category is PreferenceWarningCategory.SECURITY
     with pytest.raises(PreferenceSecurityError):
         resolution.service.save(proposed_preferences())
+    with pytest.raises(PreferenceSecurityError):
+        resolution.service.reset()
+    assert outside.read_bytes() == document(log_level="INFO")
 
 
-def test_preference_path_is_strictly_contained_and_unrelated_files_survive(
-    tmp_path: Path,
-) -> None:
+def test_preference_path_is_contained_and_unrelated_files_survive(tmp_path: Path) -> None:
     settings = preference_settings(tmp_path)
     settings.data_directory.mkdir()
     unrelated = settings.data_directory / "unrelated.txt"
@@ -463,7 +669,9 @@ def test_preference_path_is_strictly_contained_and_unrelated_files_survive(
     assert unrelated.read_text(encoding="utf-8") == "keep"
 
 
-def test_reset_deletes_only_preferences_file_and_is_idempotent(tmp_path: Path) -> None:
+def test_reset_deletes_only_preferences_file_is_idempotent_and_uses_base(
+    tmp_path: Path,
+) -> None:
     settings = preference_settings(tmp_path)
     target = write_raw(settings, document(log_level="WARNING"))
     unrelated = target.parent / "unrelated.txt"
@@ -475,69 +683,46 @@ def test_reset_deletes_only_preferences_file_and_is_idempotent(tmp_path: Path) -
 
     assert first.status is PreferenceLoadStatus.MISSING
     assert second.status is PreferenceLoadStatus.MISSING
+    assert first.preferences.log_level is LogLevelPreference.INFO
     assert not target.exists()
     assert target.parent.is_dir()
     assert unrelated.read_text(encoding="utf-8") == "keep"
 
 
-def test_reset_rejects_symlink_without_deleting_target(tmp_path: Path) -> None:
-    settings = preference_settings(tmp_path)
-    target = preference_path(settings)
-    target.parent.mkdir(parents=True)
-    outside = tmp_path / "outside.json"
-    outside.write_bytes(document(log_level="INFO"))
-    try:
-        target.symlink_to(outside)
-    except OSError:
-        pytest.skip("Symlinks are unavailable in this test environment.")
-    service = resolve_preferences(settings).service
-
-    with pytest.raises(PreferenceSecurityError):
-        service.reset()
-
-    assert outside.read_bytes() == document(log_level="INFO")
-
-
-def test_save_omits_environment_overridden_value_and_does_not_mutate_running_settings(
+def test_reset_returns_environment_owned_log_level_without_mutating_running_settings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MIRA_LOG_LEVEL", "ERROR")
     settings = preference_settings(tmp_path)
+    target = write_raw(settings, document(log_level="DEBUG"))
+    resolution = resolve_preferences(settings)
+    running = resolution.settings
+
+    snapshot = resolution.service.reset()
+
+    assert snapshot.preferences.log_level is LogLevelPreference.ERROR
+    assert snapshot.overridden_by_environment == frozenset({PreferenceField.LOG_LEVEL})
+    assert snapshot.restart_required_fields == frozenset()
+    assert resolution.settings is running
+    assert running.log_level == "ERROR"
+    assert not target.exists()
+
+
+def test_save_does_not_mutate_running_settings_and_only_log_level_restarts(
+    tmp_path: Path,
+) -> None:
+    settings = preference_settings(tmp_path)
     settings.data_directory.mkdir()
     resolution = resolve_preferences(settings)
     running = resolution.settings
 
-    result = resolution.service.save(proposed_preferences(log_level=LogLevelPreference.DEBUG))
-    persisted = preference_path(settings).read_text(encoding="utf-8")
+    result = resolution.service.save(proposed_preferences(LogLevelPreference.ERROR))
 
-    assert result.preferences.log_level is LogLevelPreference.ERROR
-    assert result.overridden_by_environment == frozenset({PreferenceField.LOG_LEVEL})
-    assert '"log_level"' not in persisted
-    assert running.log_level == "ERROR"
-    assert getattr(resolution.service, "_settings") is running
-
-
-def test_restart_required_fields_match_effective_changes(tmp_path: Path) -> None:
-    settings = preference_settings(tmp_path)
-    settings.data_directory.mkdir()
-    resolution = resolve_preferences(settings)
-
-    result = resolution.service.save(
-        proposed_preferences(
-            auto_backup=False,
-            auto_snapshot=False,
-            log_level=LogLevelPreference.ERROR,
-        )
-    )
-
-    assert result.restart_required_fields == frozenset(
-        {
-            PreferenceField.AUTO_BACKUP,
-            PreferenceField.AUTO_SNAPSHOT,
-            PreferenceField.LOG_LEVEL,
-        }
-    )
-    assert resolution.settings.auto_backup is True
-    assert resolution.settings.auto_snapshot is True
-    assert resolution.settings.log_level == "INFO"
+    assert result.restart_required_fields == frozenset({PreferenceField.LOG_LEVEL})
+    assert result.overridden_by_environment == frozenset()
+    assert resolution.settings is running
+    assert running.log_level == "INFO"
+    assert running.theme == settings.theme
+    assert running.auto_backup is settings.auto_backup
+    assert running.auto_snapshot is settings.auto_snapshot

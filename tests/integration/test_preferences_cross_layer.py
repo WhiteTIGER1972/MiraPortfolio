@@ -1,4 +1,4 @@
-"""Real bootstrap, composition, persistence, and restart preference coverage."""
+"""Real v1 startup, v2 save, restart, and environment-precedence coverage."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from app.application.preferences import (
     PreferenceField,
     PreferenceLoadStatus,
     PreferencesService,
-    ThemePreference,
     UserPreferences,
 )
 from app.application.restore import RestoreApplicationResult
@@ -62,7 +61,7 @@ def _settings(root: Path) -> Settings:
     )
 
 
-def test_preferences_flow_through_real_bootstrap_container_save_and_restart(
+def test_version_one_bootstrap_saves_version_two_and_restarts_with_precedence(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -73,18 +72,17 @@ def test_preferences_flow_through_real_bootstrap_container_save_and_restart(
         "MIRA_LOG_LEVEL",
     ):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("MIRA_LOG_LEVEL", "ERROR")
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
 
     root = tmp_path / "preference-cross-layer"
     base_settings = _settings(root)
     preference_file = runtime_paths.preferences_file(base_settings.data_directory)
     preference_file.parent.mkdir(parents=True)
-    original = (
+    version_one = (
         b'{"format_version":1,"preferences":{"auto_backup":false,'
-        b'"auto_snapshot":true,"log_level":"DEBUG","theme":"dark"}}\n'
+        b'"auto_snapshot":false,"log_level":"DEBUG","theme":"dark"}}\n'
     )
-    preference_file.write_bytes(original)
+    preference_file.write_bytes(version_one)
     original_modified_ns = preference_file.stat().st_mtime_ns
 
     restore_settings: list[Settings] = []
@@ -142,8 +140,10 @@ def test_preferences_flow_through_real_bootstrap_container_save_and_restart(
         effective = container.settings
 
         assert effective is not base_settings
-        assert effective.auto_backup is False
-        assert effective.log_level == "ERROR"
+        assert effective.log_level == "DEBUG"
+        assert effective.theme == base_settings.theme == "dark"
+        assert effective.auto_backup is base_settings.auto_backup is True
+        assert effective.auto_snapshot is base_settings.auto_snapshot is True
         assert restore_settings == [effective]
         assert preparation_settings == [effective]
         assert getattr(manager, "_settings") is effective
@@ -156,33 +156,40 @@ def test_preferences_flow_through_real_bootstrap_container_save_and_restart(
         assert windows[0].show_count == 1
         snapshot = container.preferences_service.get_current()
         assert snapshot.status is PreferenceLoadStatus.LOADED
-        assert snapshot.overridden_by_environment == frozenset({PreferenceField.LOG_LEVEL})
-        assert preference_file.read_bytes() == original
+        assert snapshot.format_version == 1
+        assert snapshot.preferences == UserPreferences(log_level=LogLevelPreference.DEBUG)
+        assert snapshot.overridden_by_environment == frozenset()
+        assert preference_file.read_bytes() == version_one
         assert preference_file.stat().st_mtime_ns == original_modified_ns
 
         saved = container.preferences_service.save(
-            UserPreferences(
-                theme=ThemePreference.DARK,
-                auto_backup=False,
-                auto_snapshot=False,
-                log_level=LogLevelPreference.DEBUG,
-            )
+            UserPreferences(log_level=LogLevelPreference.WARNING)
         )
-        saved_content = preference_file.read_bytes()
-        assert saved.preferences.log_level is LogLevelPreference.ERROR
-        assert PreferenceField.LOG_LEVEL in saved.overridden_by_environment
-        assert b'"log_level"' not in saved_content
+        version_two = preference_file.read_bytes()
+        assert version_two == (b'{"format_version":2,"preferences":{"log_level":"WARNING"}}\n')
+        assert b"theme" not in version_two
+        assert b"auto_backup" not in version_two
+        assert b"auto_snapshot" not in version_two
+        assert saved.restart_required_fields == frozenset({PreferenceField.LOG_LEVEL})
+        assert effective.log_level == "DEBUG"
+        assert effective.auto_backup is True
         assert effective.auto_snapshot is True
-        assert effective.log_level == "ERROR"
 
-        restart_base = _settings(root)
-        restart = resolve_preferences(restart_base)
-        assert restart.settings is not effective
-        assert restart.settings.auto_backup is False
-        assert restart.settings.auto_snapshot is False
-        assert restart.settings.log_level == "ERROR"
-        assert getattr(restart.service, "_settings") is restart.settings
-        assert preference_file.read_bytes() == saved_content
+        restart = resolve_preferences(_settings(root))
+        assert restart.settings.log_level == "WARNING"
+        assert restart.settings.theme == "dark"
+        assert restart.settings.auto_backup is True
+        assert restart.settings.auto_snapshot is True
+        assert restart.service.get_current().format_version == 2
+        assert preference_file.read_bytes() == version_two
+
+        monkeypatch.setenv("MIRA_LOG_LEVEL", "ERROR")
+        environment_restart = resolve_preferences(_settings(root))
+        assert environment_restart.settings.log_level == "ERROR"
+        assert environment_restart.service.get_current().overridden_by_environment == frozenset(
+            {PreferenceField.LOG_LEVEL}
+        )
+        assert preference_file.read_bytes() == version_two
     finally:
         for manager in managers:
             manager.shutdown()
@@ -191,4 +198,5 @@ def test_preferences_flow_through_real_bootstrap_container_save_and_restart(
     verify_sqlite_integrity(base_settings.database_path)
     assert list(base_settings.backup_directory.iterdir()) == []
     assert not list(root.rglob("*.mirasupport"))
+    assert not list(root.rglob("*snapshot*"))
     assert not (base_settings.database_directory / "restore").exists()

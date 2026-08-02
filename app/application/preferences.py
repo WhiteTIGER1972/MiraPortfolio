@@ -11,16 +11,7 @@ from enum import StrEnum
 class PreferenceField(StrEnum):
     """Approved user-editable Settings fields."""
 
-    THEME = "theme"
-    AUTO_BACKUP = "auto_backup"
-    AUTO_SNAPSHOT = "auto_snapshot"
     LOG_LEVEL = "log_level"
-
-
-class ThemePreference(StrEnum):
-    """Themes backed by an implemented application palette."""
-
-    DARK = "dark"
 
 
 class LogLevelPreference(StrEnum):
@@ -57,18 +48,9 @@ class PreferenceWarningCategory(StrEnum):
 class UserPreferences:
     """Complete effective values for the approved preference scope."""
 
-    theme: ThemePreference
-    auto_backup: bool
-    auto_snapshot: bool
     log_level: LogLevelPreference
 
     def __post_init__(self) -> None:
-        if not isinstance(self.theme, ThemePreference):
-            raise TypeError("theme must be a supported ThemePreference.")
-        if type(self.auto_backup) is not bool:
-            raise TypeError("auto_backup must be a strict boolean.")
-        if type(self.auto_snapshot) is not bool:
-            raise TypeError("auto_snapshot must be a strict boolean.")
         if not isinstance(self.log_level, LogLevelPreference):
             raise TypeError("log_level must be a supported LogLevelPreference.")
 
@@ -124,6 +106,5 @@ __all__ = [
     "PreferenceSnapshot",
     "PreferenceWarningCategory",
     "PreferencesService",
-    "ThemePreference",
     "UserPreferences",
 ]
