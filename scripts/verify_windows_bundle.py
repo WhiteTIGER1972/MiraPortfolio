@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import closing
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,6 +119,14 @@ class _ProcessEntry(ctypes.Structure):
         ("dwFlags", wintypes.DWORD),
         ("szExeFile", wintypes.WCHAR * 260),
     ]
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessTreeObservation:
+    """PID-scoped process identities without exposing executable paths."""
+
+    process_ids: frozenset[int]
+    executable_names: tuple[str, ...]
 
 
 def expected_revision_files(repository_root: Path) -> tuple[str, ...]:
@@ -286,7 +295,8 @@ def isolated_child_environment(
     return environment
 
 
-def _process_tree_ids(root_process_id: int) -> frozenset[int]:
+def observe_process_tree(root_process_id: int) -> ProcessTreeObservation:
+    """Return one Toolhelp snapshot of a process and every current descendant."""
     if os.name != "nt":
         raise VerificationError("Process discovery requires Windows.")
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -302,13 +312,19 @@ def _process_tree_ids(root_process_id: int) -> frozenset[int]:
     snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     if snapshot == ctypes.c_void_p(-1).value:
         raise VerificationError("The launched process tree could not be inspected.")
-    relationships: list[tuple[int, int]] = []
+    relationships: list[tuple[int, int, str]] = []
     entry = _ProcessEntry()
     entry.dwSize = ctypes.sizeof(_ProcessEntry)
     try:
         available = bool(kernel32.Process32FirstW(snapshot, ctypes.byref(entry)))
         while available:
-            relationships.append((int(entry.th32ProcessID), int(entry.th32ParentProcessID)))
+            relationships.append(
+                (
+                    int(entry.th32ProcessID),
+                    int(entry.th32ParentProcessID),
+                    Path(entry.szExeFile).name,
+                )
+            )
             available = bool(kernel32.Process32NextW(snapshot, ctypes.byref(entry)))
     finally:
         kernel32.CloseHandle(snapshot)
@@ -317,11 +333,25 @@ def _process_tree_ids(root_process_id: int) -> frozenset[int]:
     changed = True
     while changed:
         changed = False
-        for process_id, parent_process_id in relationships:
+        for process_id, parent_process_id, _ in relationships:
             if parent_process_id in process_ids and process_id not in process_ids:
                 process_ids.add(process_id)
                 changed = True
-    return frozenset(process_ids)
+    names = tuple(
+        sorted(
+            {
+                executable_name
+                for process_id, _, executable_name in relationships
+                if process_id in process_ids
+            },
+            key=str.casefold,
+        )
+    )
+    return ProcessTreeObservation(frozenset(process_ids), names)
+
+
+def _process_tree_ids(root_process_id: int) -> frozenset[int]:
+    return observe_process_tree(root_process_id).process_ids
 
 
 def _visible_windows_for_processes(
@@ -455,7 +485,7 @@ def verify_database(database: Path, expected_head: str) -> DatabaseVerification:
     if not database.is_file() or database.is_symlink():
         raise VerificationError("The isolated first-run database was not created safely.")
     try:
-        with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as connection:
+        with closing(sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)) as connection:
             integrity = connection.execute("PRAGMA quick_check").fetchone()
             if integrity != ("ok",):
                 raise VerificationError("The isolated SQLite database failed quick_check.")

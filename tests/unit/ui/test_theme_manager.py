@@ -15,6 +15,18 @@ def test_dark_theme_reapplication_is_idempotent(qapplication: QApplication) -> N
     assert qapplication.styleSheet() == first_stylesheet
 
 
+def test_dark_theme_covers_dialog_tabs_and_scroll_content(
+    qapplication: QApplication,
+) -> None:
+    ThemeManager.apply(qapplication, "dark")
+    stylesheet = qapplication.styleSheet()
+
+    assert "QMainWindow, QDialog, QWidget#central" in stylesheet
+    assert "QTabWidget::pane" in stylesheet
+    assert "QTabBar::tab:selected" in stylesheet
+    assert "QScrollArea > QWidget > QWidget" in stylesheet
+
+
 def test_unsupported_theme_is_rejected_before_application_changes(
     qapplication: QApplication,
 ) -> None:

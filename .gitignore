@@ -10,6 +10,7 @@ venv/
 # Distribution
 build/
 dist/
+artifacts/
 *.egg-info/
 
 # IDE

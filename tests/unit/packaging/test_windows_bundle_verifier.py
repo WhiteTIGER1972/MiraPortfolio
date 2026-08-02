@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import struct
 from pathlib import Path
@@ -16,6 +17,7 @@ from scripts.verify_windows_bundle import (
     expected_revision_files,
     fingerprint_tree,
     isolated_child_environment,
+    observe_process_tree,
     validate_static_bundle,
     verify_database,
 )
@@ -146,3 +148,12 @@ def test_verifier_source_uses_finite_graceful_windows_shutdown() -> None:
     assert "process.wait(timeout=shutdown_timeout_seconds)" in source
     assert "process.kill()" in source
     assert "QT_QPA_PLATFORM=offscreen" not in source
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Toolhelp process enumeration")
+def test_process_tree_observation_returns_pid_and_sanitized_basename() -> None:
+    observation = observe_process_tree(os.getpid())
+
+    assert os.getpid() in observation.process_ids
+    assert observation.executable_names
+    assert all("\\" not in name and "/" not in name for name in observation.executable_names)

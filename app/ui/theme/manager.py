@@ -18,7 +18,15 @@ class ThemeManager:
         application.setFont(QFont("Inter", 10))
         application.setStyleSheet(
             f"\n* {{ color: {Colors.TEXT}; font-family: Inter, Segoe UI, sans-serif; }}\n"
-            f"QMainWindow, QWidget#central {{ background: {Colors.BACKGROUND}; }}\n"
+            f"QMainWindow, QDialog, QWidget#central {{ background: {Colors.BACKGROUND}; }}\n"
+            f"QTabWidget::pane {{ background: {Colors.BACKGROUND}; "
+            f"border: 1px solid {Colors.BORDER}; }}\n"
+            f"QTabBar::tab {{ background: {Colors.SURFACE}; color: {Colors.MUTED}; "
+            f"border: 1px solid {Colors.BORDER}; padding: 8px 14px; }}\n"
+            f"QTabBar::tab:selected {{ background: {Colors.SURFACE_RAISED}; "
+            f"color: {Colors.TEXT}; }}\n"
+            f"QScrollArea, QScrollArea > QWidget > QWidget {{ "
+            f"background: {Colors.BACKGROUND}; border: none; }}\n"
             f"QToolBar {{ background: {Colors.BACKGROUND}; border: none; "
             "spacing: 12px; padding: 12px 24px; }\n"
             f"QStatusBar {{ background: {Colors.SURFACE}; "

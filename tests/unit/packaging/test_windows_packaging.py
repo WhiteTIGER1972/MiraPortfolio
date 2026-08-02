@@ -11,6 +11,8 @@ PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 SPEC = PROJECT_ROOT / "packaging" / "windows" / "MiraPortfolio.spec"
 BUILD_SCRIPT = PROJECT_ROOT / "scripts" / "build_windows.ps1"
 VERIFIER = PROJECT_ROOT / "scripts" / "verify_windows_bundle.py"
+CLEAN_VALIDATOR = PROJECT_ROOT / "scripts" / "clean_install_validation.py"
+CLEAN_VALIDATOR_SCRIPT = PROJECT_ROOT / "scripts" / "validate_clean_install.ps1"
 
 
 def test_packaging_extra_pins_pyinstaller_without_runtime_dependency() -> None:
@@ -78,5 +80,5 @@ def test_build_script_enforces_toolchain_and_owned_output_policy() -> None:
 def test_packaging_configuration_contains_no_developer_absolute_path() -> None:
     developer_path = str(PROJECT_ROOT).casefold()
 
-    for path in (SPEC, BUILD_SCRIPT, VERIFIER):
+    for path in (SPEC, BUILD_SCRIPT, VERIFIER, CLEAN_VALIDATOR, CLEAN_VALIDATOR_SCRIPT):
         assert developer_path not in path.read_text(encoding="utf-8").casefold()
